@@ -1,7 +1,8 @@
 # MLS — Math Language Server
 
-The repository currently implements M1: a deterministic, offline parser CLI for
-TeXmacs native (`.tm`) documents. It finds sections, definitions, theorem-family
+The repository implements M1, a deterministic, offline parser CLI for TeXmacs
+native (`.tm`) documents, and M2, a batch statement-formalization command.
+The M1 parser finds sections, definitions, theorem-family
 environments, equations, and proofs; reports exact-source hashes, labels, and
 explicit label dependencies as JSON; and assigns unique UUIDs for the run.
 Untagged rendered content in the document body is grouped into commentary blocks,
@@ -36,7 +37,7 @@ Run formatting, lint, unit, property, and CLI integration checks with:
 make test
 ```
 
-M2 is in development. `mls-sir` provides validated statement schemas, semantic
+M2 adds `mls-sir`, which provides validated statement schemas, semantic
 hashes, and field diffs. `mls-models` provides configured OpenRouter generation
 and typed Jev decisions, auditable recordings, and strict offline replay. Model
 IDs and request limits live in `config/models.json`. Tests use synthetic fixtures
@@ -51,9 +52,8 @@ MLS_LIVE=1 cargo test -p mls-models live_openrouter_smoke_explicitly_gated -- --
 
 Sanitized call records are stored under ignored `.mls/log/live-smoke/` directories.
 Missing cost or confidence remains unknown; it is never silently treated as zero
-or certainty. The batch formalization command is not ready yet. Progress and
-executed evidence are tracked in [docs/progress.md](docs/progress.md) and
-[docs/validation.md](docs/validation.md).
+or certainty. Progress and executed evidence are tracked in
+[docs/progress.md](docs/progress.md) and [docs/validation.md](docs/validation.md).
 
 The local Lean integration currently targets Apple Silicon macOS. Install the
 pinned Lean 4.19.0, Mathlib and community REPL under ignored repository-local
@@ -76,3 +76,41 @@ after structural checks. Its generated-source admission grammar is deliberately
 restricted; unsupported syntax is an error. Shadow sections use validated module
 names and dependency order. If interleaved dependencies create a cycle between
 whole sections, generation rejects it rather than emitting invalid Lean imports.
+
+## Batch statement formalization (M2)
+
+`mls batch` drafts a statement intermediate representation (SIR) for every
+definition and theorem-family block, asks the generation model for one Lean
+statement, elaborates it with a `sorry` placeholder in the pinned Lean worker,
+and compares the trusted extracted structure with the SIR:
+
+```sh
+cargo build -p mls-cli
+target/debug/mls batch notes.tm --replay RECORDINGS_DIR --output report.json
+MLS_LIVE=1 target/debug/mls batch notes.tm --live --output report.json
+```
+
+Exactly one of `--replay DIR` (offline, strict request matching) or `--live` is
+required. Live calls also require `MLS_LIVE=1` and `OPENROUTER_API_KEY`, and
+are recorded under `<document dir>/.mls/log/batch-<UUID>/`, the path printed to
+stderr. The command writes a document-adjacent pinned Lake project with one
+generated `Shadow/SectionN.lean` per section (`lake build Shadow` compiles it)
+and only touches files it owns. Results are unconfirmed drafts: statuses are
+`sir_drafted` or `formalization_error`; nothing is reported as confirmed or
+verified. Each structure check is `matched`, `mismatch` or `unchecked`, and
+semantic content (types, hypothesis and conclusion text) is always unchecked in
+M2. `--max-attempts N` bounds Lean repairs per statement (default 3).
+
+The evaluation corpus and runner live in `evals/`; see
+[evals/README.md](evals/README.md) and the results in
+[docs/evals.md](docs/evals.md):
+
+```sh
+python3 evals/run.py --replay RECORDINGS_DIR
+MLS_LIVE=1 python3 evals/run.py --live --max-attempts 2
+```
+
+`make test` runs the offline suites (including the evaluator tests);
+`make test-lean` additionally runs the real-Lean worker, pipeline and batch
+tests. Real-Lean tests skip themselves unless `MLS_LEAN_TESTS=1`, which
+`make test-lean` sets.

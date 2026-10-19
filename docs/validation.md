@@ -134,3 +134,26 @@ probe compiled two generated section modules with a dependency import. The
 versioned Lake template declares the Shadow submodule target; setup creates its
 directory. The proof-placeholder warning was expected. Parallel batch-engine
 changes were excluded from the snapshot.
+
+## 2026-10-20 — M2 batch pipeline acceptance
+
+- `make test` (evaluator unit tests, `cargo fmt --check`, Clippy with
+  `-D warnings`, workspace tests) and `make test-lean` (extractor rebuild, real
+  REPL admission/extraction tests, real Lean worker, engine pipeline and CLI
+  batch tests) passed after the final iteration-3 changes.
+- Regression tests cover interleaved pending candidates in two
+  `LeanStatementChecker`s (real Lean), stale evidence after a mismatch followed
+  by an elaboration failure, diagnostics cleared after a later hard mismatch,
+  non-UTF-8 blocks, report-before-shadow and output/ownership preflights.
+- Independent differential probes compared the engine's outer-head recognizer
+  with pinned-Lean extraction on several thousand generated conclusions;
+  reviewers found no wrong `matched` result in the final rounds. Admission
+  probes (about 190 real REPL cases) found no admitted tactic or elaborator
+  after `deriving` and proof-escape identifiers were blocked.
+- Three live runs over the ten-case corpus cost $0.267934, $0.179008 and
+  $0.163104 (74 calls, all with reported cost). Each was replayed offline from
+  its captured calls with byte-identical block reports and usage. Results and
+  manual mathematical inspection are in [evals.md](evals.md).
+
+These results support the M2 go decision only within the limits stated in
+`evals.md`. No status in M2 is confirmed or verified.

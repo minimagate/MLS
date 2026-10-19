@@ -116,3 +116,75 @@ macOS-specific. All downloads and caches remain repository-local and ignored.
 The shadow generator rejects cycles between section modules, even when a block
 graph could be linearized by splitting sections. This conservative M2 limitation
 avoids invalid import cycles; section splitting is not inferred silently.
+
+## 2026-10-19 — Conservative outer-head recognition and check scopes
+Context: the final pipeline review reproduced false hard results from the SIR
+outer-head guesser: `x = 0 and P` matched Lean `eq`, while prose quantifiers
+(`For each x, …`, `There is x with …`) and `¬ x = 0` produced false mismatches.
+A second review found that a blocklist kept leaking (TeX/TeXmacs spellings such
+as `<rightarrow>`, curly quotes, "there exists exactly one").
+Choice: every character must be in an explicit allowlist (ASCII alphanumerics,
+basic operators, a fixed set of Unicode mathematical symbols, Greek letters);
+TeXmacs tags and TeX commands are rejected. Then recognize only a leading `∀`,
+a leading `∃` (not `∃!` and without counting words such as "exactly" or
+"unique"), or a purely symbolic top-level `↔ → ∨ ∧ =` scan with no
+natural-language connective, top-level comma/semicolon/colon or unspaced
+connective. Prose quantifier prefixes are not recognized. For definitions an
+equality head stays unchecked, because `=` in a defining expression may separate
+the defined name from the body. A third review, probing about 1,300 generated
+conclusions against real Lean heads, found prose-led text ("No real x satisfies
+…") and relation chains inside quantifier bodies (Lean ends the body before a
+second relation or `↔`). Outside a quantifier prefix, any purely alphabetic
+ASCII word of two or more letters now vetoes recognition unless it is a listed
+function name (`sin`, `exp`, `ker`, …). Any depth-0 `↔` in a quantifier body,
+and any segment between connectives holding two relations, also leaves the
+head unchecked. A final review found that convergence arrows (`a_n → 0`) were
+read as implication, although Mathlib encodes limits with `Tendsto`. Implication
+is now recognized only when every top-level operand contains a relation or
+logical connective; nested arrows and `lim` leave the head unchecked, and the
+prose-word veto also applies inside quantifier bodies. Why: a hard check must
+never guess; unchecked is the honest result for unsupported prose.
+
+Every structure check now carries `scope`: `structure` (mechanical) or
+`semantics` (variable types, hypothesis/conclusion/body content, always
+unchecked in M2). `complete_structure` means accepted with every
+structure-scoped check implemented and matched. Why: the previous definition
+could never be true, because semantic content is unchecked by design.
+
+## 2026-10-19 — No lost paid results
+Context: recording I/O failure discarded successful paid replies, and late
+filesystem errors (missing output directory, stale shadow manifest) discarded
+the batch report after all model calls. Choice: `RecordingClient` returns the
+provider result unchanged and exposes `persistence_failure()`; the CLI preflights
+the output location, writes the report before the shadow project, and exits
+nonzero afterwards for incomplete recordings or shadow failures. After the first
+unpersisted record, the recording client makes no further live calls. Replay misses
+no longer count as provider calls. Why: a retry must not silently pay twice, and
+an unreplayable recording must be visible.
+
+## 2026-10-20 — M2 iteration 2: SIR contract and admission notations
+Context: live run 1 showed typing facts restated as SIR hypotheses (padded in
+Lean with vacuous `True` binders), bound variables listed as SIR variables, TeX
+or prose conclusions, and our admission grammar rejecting `|x|` and binder
+predicates such as `∃ c ∈ S`. Choice: the SIR instructions now define variables
+as the free parameters only, hypotheses as propositional assumptions only, and
+conclusions in Unicode notation without TeX. The Lean instructions fix binder
+order and forbid padding. A hard structure check rejects any hypothesis binder
+whose extracted type is literally `True`; it is deliberately literal, so other
+vacuous forms (`1 = 1`, `True ∧ True`) remain undetected and are a stated
+limitation. Admission accepts additional pure term notations (binder
+predicates, `∃!`, `≠ ¬ ↔ ∉ ⊆ ∣ • ∘ ⁻¹ ×`, unary minus, set-builder, absolute
+value, numeric projections). `group` nodes are admitted only inside the
+absolute-value and typed set-builder shapes. `deriving` clauses and
+proof-escape identifiers (`sorryAx`, `native_decide`, `ofReduceBool`, …) are
+rejected. Why: these notations expand to ordinary applications and execute
+nothing at admission; the restriction keeps generic parser nodes from opening
+other constructs.
+
+## 2026-10-20 — Keep the evaluated prompt
+Context: the final review noted that the Lean instructions mention
+"autoImplicit false semantics" in the same sentence that forbids `set_option`.
+Choice: leave the wording unchanged in the M2 commit, so the committed prompts
+are exactly those that produced, and replay, evaluation run 3. Why: changing
+prompts invalidates the recorded evidence; the wording is revisited with the
+next prompt change.
