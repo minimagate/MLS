@@ -235,6 +235,175 @@ class ExtractorIntegrationTests(unittest.TestCase):
             self.assertTrue(errors(response), response)
             self.assertEqual(validation_payloads(response), [])
 
+    def reject(self, name: str, source: str, fragment: str | None = None) -> None:
+        response = self.repl.request({
+            "env": self.base_env,
+            "cmd": f"#mls_validate_source {name} from_source {lean_string(source)}",
+        })
+        self.assertTrue(errors(response), response)
+        self.assertEqual(validation_payloads(response), [], response)
+        if fragment is not None:
+            messages = "\n".join(m.get("data", "") for m in errors(response))
+            self.assertIn(fragment, messages, response)
+
+    def test_notation_admitted_and_extracted_with_goal_heads(self) -> None:
+        # Each case: (case, declaration name, source, expected goal_outer_head).
+        for case, name, source, head in NOTATION_CASES:
+            with self.subTest(case=case):
+                self.validate(source, name)
+                _, data = self.extract(source, name)
+                self.assertEqual(data["kind"], "theorem")
+                self.assertEqual(data["goal_outer_head"], head)
+                self.assertTrue(data["has_sorry"])
+
+    def test_definition_body_with_absolute_value_is_admitted(self) -> None:
+        source = "def mls_def_abs (x : ℝ) : ℝ := |x|"
+        self.validate(source, "mls_def_abs")
+        _, data = self.extract(source, "mls_def_abs")
+        self.assertEqual(data["kind"], "definition")
+        self.assertEqual(data["goal_outer_head"], "constant")
+        self.assertEqual(data["body_outer_head"], "app")
+
+    def test_group_is_rejected_outside_abs_and_typed_set_builder(self) -> None:
+        # `⋃ x : ℕ, S x` produces a `group` around its type.  Only `|a|` and typed
+        # set-builder binders may contain one, so this must fail as `group`.
+        self.reject(
+            "mls_group_union",
+            "theorem mls_group_union (S : ℕ → Set ℝ) (T : Set ℝ) : "
+            "(⋃ x : ℕ, S x) = T := by sorry",
+            "unsupported syntax 'group'",
+        )
+        # The typed set-builder itself is admitted (see NOTATION_CASES), but a
+        # tactic inside its binder type stays rejected.
+        self.reject(
+            "mls_setb_tac",
+            "theorem mls_setb_tac (S : Set ℝ) : {x : ℝ | by exact True} = S := by sorry",
+            "unsupported syntax 'Lean.Parser.Tactic.exact'",
+        )
+
+    def test_effectful_and_out_of_context_syntax_stays_rejected(self) -> None:
+        cases = [
+            ("mls_run", "theorem mls_run (n : ℕ) : n = n := by simp", None),
+            ("mls_macro", 'macro "mls_x" : term => `(0)', "expected exactly one"),
+            ("mls_tac_sig", "theorem mls_tac_sig : (by exact 0 : ℕ) = 0 := by sorry",
+             "unsupported syntax 'Lean.Parser.Tactic.exact'"),
+            ("mls_show", "theorem mls_show : (show (0:ℕ) = 0 from by rfl) := by sorry", None),
+            ("mls_default", "theorem mls_default (d : Bool := by exact true) : True := by sorry",
+             "unsupported syntax 'Lean.Parser.Tactic.exact'"),
+            ("mls_abs_tac", "theorem mls_abs_tac (x : ℝ) : |(by exact x : ℝ)| = x := by sorry",
+             "unsupported syntax 'Lean.Parser.Tactic.exact'"),
+            ("mls_def_tac", "def mls_def_tac (x : ℝ) : ℝ := (by exact x)",
+             "unsupported syntax 'Lean.Parser.Tactic.exact'"),
+            # Named projections on a parenthesised term are not admitted; numeric ones are.
+            ("mls_named", "theorem mls_named (p : ℝ × ℝ) : (p).fst = (p).snd := by sorry",
+             "unsupported syntax 'Lean.Parser.Term.proj'"),
+            ("mls_subtype", "theorem mls_subtype (P : ℝ → Prop) (S : Set ℝ) : "
+             "{x : ℝ // P x} = S := by sorry", "unsupported syntax '«term{_:_//_}»'"),
+        ]
+        for name, source, fragment in cases:
+            with self.subTest(case=name):
+                self.reject(name, source, fragment)
+
+    def test_deriving_clause_is_rejected(self) -> None:
+        # A deriving handler is an executable elaborator, so the clause must be
+        # rejected at validation, before the source is elaborated.
+        self.reject("e3", "def e3 : Nat := 0 deriving Repr, BEq", "unsupported syntax 'deriving'")
+        self.reject("e4", "def e4 : Nat := 0 deriving Repr", "unsupported syntax 'deriving'")
+
+    def test_unsafe_identifiers_are_rejected(self) -> None:
+        # Identifiers are checked component by component; each case below is a
+        # reproducer that was admitted before the identifier denylist existed.
+        cases = [
+            ("m9", "def m9 : Nat := sorryAx Nat true", "unsupported syntax 'sorryAx'"),
+            ("m9_at", "def m9_at : Nat := @sorryAx Nat true", "unsupported syntax 'sorryAx'"),
+            ("m9_qualified", "def m9_q : Nat := Lean.sorryAx Nat true", "unsupported syntax 'sorryAx'"),
+            ("mls_nd", "def mls_nd : Bool := native_decide (2 = 2)",
+             "unsupported syntax 'native_decide'"),
+            ("mls_rt", "def mls_rt : Unit := run_tac pure ()", "unsupported syntax 'run_tac'"),
+            ("mls_ofrb", "def mls_ofrb (a b : Bool) (h : a = b) : Bool := Lean.ofReduceBool a b h",
+             "unsupported syntax 'ofReduceBool'"),
+            ("mls_ofrn", "def mls_ofrn (a b : Nat) (h : a = b) : Nat := Lean.ofReduceNat a b h",
+             "unsupported syntax 'ofReduceNat'"),
+            ("mls_uc", "def mls_uc : Nat := unsafeCast 0", "unsupported syntax 'unsafeCast'"),
+            ("mls_io", "def mls_io : Nat := IO.println", "unsupported syntax 'IO'"),
+            ("mls_dbg", 'def mls_dbg : Nat := dbgTrace "x" fun _ => 0', "unsupported syntax 'dbgTrace'"),
+            ("mls_tc", "def mls_tc : Nat := Lean.trustCompiler 0", "unsupported syntax 'trustCompiler'"),
+            ("mls_panic", 'def mls_panic : Nat := panic! "x"', "unsupported syntax 'panic!'"),
+        ]
+        for name, source, fragment in cases:
+            with self.subTest(case=name):
+                self.reject(name, source, fragment)
+
+    def test_classical_choice_remains_admitted(self) -> None:
+        # A theorem signature (not a computable body, which would need `noncomputable`).
+        source = ("theorem mls_choice (α : Type) (h : Nonempty α) : "
+                  "Classical.choice h = Classical.choice h := by sorry")
+        self.validate(source, "mls_choice")
+        _, data = self.extract(source, "mls_choice")
+        self.assertEqual(data["kind"], "theorem")
+        self.assertIn("Classical.choice", data["goal"])
+        self.assertIn("Classical.choice", data["axioms"])
+
+
+NOTATION_CASES = [
+    ("abs_le", "mls_abs_le", "theorem mls_abs_le (x : ℝ) : |x| ≤ 1 := by sorry", "app"),
+    ("abs_triangle", "mls_triangle",
+     "theorem mls_triangle (x y : ℝ) : |x + y| ≤ |x| + |y| := by sorry", "app"),
+    ("abs_bounded_sequence", "mls_bounded",
+     "theorem mls_bounded (u : ℕ → ℝ) : ∃ M : ℝ, ∀ n : ℕ, |u n| ≤ M := by sorry", "exists"),
+    ("abs_parenthesised", "mls_abs_paren",
+     "theorem mls_abs_paren (x : ℝ) : |(x + 1)| ≤ 2 := by sorry", "app"),
+    ("forall_membership", "mls_forall_mem",
+     "theorem mls_forall_mem (S : Set ℝ) (P : ℝ → Prop) : ∀ x ∈ S, P x := by sorry", "forall"),
+    ("exists_membership", "mls_exists_mem",
+     "theorem mls_exists_mem (S : Set ℝ) (P : ℝ → Prop) : ∃ x ∈ S, P x := by sorry", "exists"),
+    ("forall_positive", "mls_forall_pos",
+     "theorem mls_forall_pos (P : ℕ → Prop) : ∀ ε > 0, P ε := by sorry", "forall"),
+    ("exists_positive", "mls_exists_pos",
+     "theorem mls_exists_pos (P : ℕ → Prop) : ∃ δ > 0, P δ := by sorry", "exists"),
+    ("forall_at_least", "mls_forall_ge",
+     "theorem mls_forall_ge (a : ℝ) (P : ℝ → Prop) : ∀ x ≥ a, P x := by sorry", "forall"),
+    ("exists_less_than", "mls_exists_lt",
+     "theorem mls_exists_lt (m : ℕ) (P : ℕ → Prop) : ∃ n < m, P n := by sorry", "exists"),
+    ("extremum_in_interval", "mls_icc",
+     "theorem mls_icc (f : ℝ → ℝ) (a b : ℝ) : "
+     "∃ c ∈ Set.Icc a b, ∀ x ∈ Set.Icc a b, f x ≤ f c := by sorry", "exists"),
+    ("exists_two_binders", "mls_exists_two",
+     "theorem mls_exists_two (P : ℕ → ℕ → Prop) : ∃ x y, P x y := by sorry", "exists"),
+    ("exists_typed_binder", "mls_exists_typed",
+     "theorem mls_exists_typed (P : ℝ → Prop) : ∃ x : ℝ, P x := by sorry", "exists"),
+    ("exists_unique", "mls_unique",
+     "theorem mls_unique (P : ℝ → Prop) : ∃! x, P x := by sorry", "app"),
+    ("not_equal", "mls_ne", "theorem mls_ne (a b : ℝ) : a ≠ b := by sorry", "app"),
+    ("negation", "mls_not", "theorem mls_not (P : Prop) : ¬ P := by sorry", "app"),
+    ("iff", "mls_iff", "theorem mls_iff (P Q : Prop) : P ↔ Q := by sorry", "iff"),
+    ("arrow", "mls_arrow", "theorem mls_arrow (P Q : Prop) : P → Q := by sorry", "forall"),
+    ("not_member", "mls_notin", "theorem mls_notin (x : ℝ) (S : Set ℝ) : x ∉ S := by sorry", "app"),
+    ("subset", "mls_subset", "theorem mls_subset (S T : Set ℝ) : S ⊆ T := by sorry", "app"),
+    ("divides", "mls_dvd", "theorem mls_dvd (d n : ℕ) : d ∣ n := by sorry", "app"),
+    ("set_builder", "mls_setb",
+     "theorem mls_setb (P : ℝ → Prop) (S : Set ℝ) : {x | P x} = S := by sorry", "eq"),
+    ("typed_set_builder", "mls_setb_typed",
+     "theorem mls_setb_typed (P : ℝ → Prop) (S : Set ℝ) : {x : ℝ | P x} = S := by sorry", "eq"),
+    ("membership_set_builder", "mls_setb_mem",
+     "theorem mls_setb_mem (S T : Set ℝ) (P : ℝ → Prop) : {x ∈ S | P x} = T := by sorry", "eq"),
+    ("typed_set_builder_abs", "mls_setb_abs",
+     "theorem mls_setb_abs (S : Set ℝ) : {x : ℝ | |x| ≤ 1} = S := by sorry", "eq"),
+    ("negation_of_term", "mls_neg", "theorem mls_neg (x y : ℝ) : -x = y := by sorry", "eq"),
+    ("inverse", "mls_inv", "theorem mls_inv (x y : ℝ) : x⁻¹ = y := by sorry", "eq"),
+    ("scalar_multiplication", "mls_smul", "theorem mls_smul (c v w : ℝ) : c • v = w := by sorry", "eq"),
+    ("composition", "mls_comp", "theorem mls_comp (f g h : ℝ → ℝ) : f ∘ g = h := by sorry", "eq"),
+    ("numeric_projection", "mls_proj",
+     "theorem mls_proj (p : ℝ × ℝ) : p.1 = p.2 := by sorry", "eq"),
+    ("parenthesised_numeric_projection", "mls_paren_num",
+     "theorem mls_paren_num (p : ℝ × ℝ) : (p).1 = (p).2 := by sorry", "eq"),
+    ("product_type", "mls_prod",
+     "theorem mls_prod (α β : Type) : (α × β) = (α × β) := by sorry", "eq"),
+    ("tendsto", "mls_tendsto",
+     "theorem mls_tendsto (u : ℕ → ℝ) : Filter.Tendsto u Filter.atTop (nhds 0) := by sorry", "app"),
+    ("function_type", "mls_fin", "theorem mls_fin (v : Fin 2 → ℝ) : v = v := by sorry", "eq"),
+]
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

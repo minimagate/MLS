@@ -31,14 +31,39 @@ private structure ParsedHeader where
   kind : String
   binderCount : Nat
 
-private partial def isAllowedAdmissionSyntax (stx : Syntax) : Bool :=
-  if stx.isAtom || stx.isIdent || stx.isMissing then
-    let value := if stx.isAtom then stx.getAtomVal else ""
-    !["run_tac", "eval%", "unsafeIO", "do", "unsafe", "partial",
-      "implemented_by", "macro", "syntax", "elab"].contains value
-  else
-  let kind := stx.getKind.toString
-  let allowedKind := [
+/-- Keyword atoms that can never appear in admitted source.  `sorry` is deliberately
+absent: the engine-injected placeholder body `by sorry` contains that atom.
+`deriving` is the keyword of the optional deriving clause: Lean stores it in a
+plain `null` node after the definition body, so only this atom rejects it. -/
+private def blockedAtoms : List String :=
+  ["run_tac", "eval%", "unsafeIO", "do", "unsafe", "partial",
+    "implemented_by", "macro", "syntax", "elab", "deriving", "dbg_trace", "panic!"]
+
+/-- Identifier components that can never appear in admitted source.  Each
+component of a dotted name is checked, so `Lean.ofReduceBool` is rejected through
+its `ofReduceBool` component.  A leading `@` is ignored.  Identifiers are otherwise
+unrestricted: `Classical.choice` is admitted because the mathematics needs it. -/
+private def blockedIdentifiers : List String :=
+  ["sorryAx", "sorry", "native_decide", "ofReduceBool", "ofReduceNat", "run_tac",
+    "implemented_by", "extern", "unsafeCast", "unsafeIO", "IO", "dbgTrace", "dbg_trace",
+    "panic", "panic!", "trustCompiler"]
+
+private def nameComponents : Name → List String
+  | .anonymous => []
+  | .str pre s => s :: nameComponents pre
+  | .num pre _ => nameComponents pre
+
+/-- The first blocked component of an identifier, if any. -/
+private def blockedIdentifier? (name : Name) : Option String :=
+  (nameComponents name).findSome? fun component =>
+    let bare := if component.startsWith "@" then component.drop 1 else component
+    if blockedIdentifiers.contains bare then some bare else none
+
+/-- Node kinds admitted by the generic walk.  `group` is deliberately absent:
+Lean's `group` node is produced by `|a|` and by typed set-builder binders, and
+only those two exact shapes are admitted (see `absBarsShape` and
+`setBuilderRejected?`).  A `group` anywhere else is rejected. -/
+private def admittedKinds : List String := [
     "null",
     "Lean.Parser.Command.declaration", "Lean.Parser.Command.theorem",
     "Lean.Parser.Command.definition", "Lean.Parser.Command.declModifiers",
@@ -57,18 +82,92 @@ private partial def isAllowedAdmissionSyntax (stx : Syntax) : Bool :=
     "termℕ", "termℤ", "termℚ", "termℝ", "termℂ",
     "«term∃_,_»", "«term_=_»", "«term_+_»", "«term_-_»", "«term_*_»",
     "«term_/_»", "«term_^_»", "«term_<_»", "«term_≤_»", "«term_>_»",
-    "«term_≥_»", "«term_∈_»", "«term_∧_»", "«term_∨_»"
-  ].contains kind
-  allowedKind && stx.getArgs.all isAllowedAdmissionSyntax
+    "«term_≥_»", "«term_∈_»", "«term_∧_»", "«term_∨_»",
+    -- quantifiers with binder predicates: `∀ x ∈ S, P`, `∃ δ > 0, P`, ...
+    "Lean.«term∀__,_»", "Lean.«term∃__,_»", "Mathlib.Notation.«term∃!_,_»",
+    "Lean.«binderTerm∈_»", "Lean.«binderTerm>_»", "Lean.«binderTerm≥_»",
+    "Lean.«binderTerm<_»",
+    -- relations, connectives and pure algebraic notation
+    "«term_≠_»", "«term¬_»", "«term_↔_»", "«term_∉_»", "«term_⊆_»", "«term_∣_»",
+    "«term-_»", "«term_⁻¹»", "«term_•_»", "«term_∘_»", "«term_×_»"
+  ]
 
-private partial def firstRejectedSyntax? (stx : Syntax) : Option String := do
-  if !isAllowedAdmissionSyntax stx then
-    for child in stx.getArgs do
-      match firstRejectedSyntax? child with
-      | some rejected => return rejected
-      | none => pure ()
-    return stx.getKind.toString
-  none
+private def absNotationKind : String := "«term|___|»"
+private def setBuilderKind : String := "Mathlib.Meta.setBuilder"
+private def extBinderKind : String := "Batteries.ExtendedBinder.extBinder"
+private def projectionKind : String := "Lean.Parser.Term.proj"
+private def groupKind : String := "group"
+
+private def isAtomValue (stx : Syntax) (value : String) : Bool :=
+  stx.isAtom && stx.getAtomVal == value
+
+private def isNumericAtom (stx : Syntax) : Bool :=
+  stx.isAtom && !stx.getAtomVal.isEmpty && stx.getAtomVal.all Char.isDigit
+
+/-- Mathlib's `|a|` (`term|___|`) has exactly the children
+`group["|"]`, the inner term, an empty `group`, and a closing `"|"`. -/
+private def absBarsShape (stx : Syntax) : Bool :=
+  stx.getNumArgs == 4 &&
+    (stx.getArg 0).getKind.toString == groupKind && (stx.getArg 0).getNumArgs == 1 &&
+    isAtomValue ((stx.getArg 0).getArg 0) "|" &&
+    (stx.getArg 2).getKind.toString == groupKind && (stx.getArg 2).getNumArgs == 0 &&
+    isAtomValue (stx.getArg 3) "|"
+
+/-- Only numeric projections of a parenthesised or bare term, `(p).1` or `p.1`, are
+admitted (both are `Term.proj` with a `fieldIdx`); named projections `(p).foo` are
+rejected.  A dotted identifier such as `p.fst` is a plain identifier, not a `Term.proj`,
+and is checked only by `blockedIdentifier?`. -/
+private def numericProjection (stx : Syntax) : Bool :=
+  stx.getNumArgs == 3 &&
+    (stx.getArg 2).getKind.toString == "fieldIdx" &&
+    (stx.getArg 2).getNumArgs == 1 &&
+    isNumericAtom ((stx.getArg 2).getArg 0)
+
+mutual
+/-- The first syntax kind outside the admission grammar, if the tree is not admitted. -/
+private partial def firstRejectedSyntax? (stx : Syntax) : Option String :=
+  if stx.isAtom then
+    if blockedAtoms.contains stx.getAtomVal then some stx.getKind.toString else none
+  else if stx.isIdent then
+    blockedIdentifier? stx.getId
+  else if stx.isMissing then none
+  else
+    let kind := stx.getKind.toString
+    if kind == absNotationKind then
+      if absBarsShape stx then firstRejectedSyntax? (stx.getArg 1) else some kind
+    else if kind == setBuilderKind then
+      setBuilderRejected? stx
+    else if kind == projectionKind then
+      if numericProjection stx then firstRejectedSyntax? (stx.getArg 0) else some kind
+    else if admittedKinds.contains kind then
+      stx.getArgs.toList.findSome? firstRejectedSyntax?
+    else
+      some ((stx.getArgs.toList.findSome? firstRejectedSyntax?).getD kind)
+
+/-- `{x | P}`, `{x ∈ S | P}` and typed `{x : T | P}`.  The typed form is the only
+place a `group` may hold a type, and it is admitted solely as `group[":", T]`. -/
+private partial def setBuilderRejected? (stx : Syntax) : Option String :=
+  let binder := stx.getArg 1
+  let wellFormed :=
+    stx.getNumArgs == 5 && isAtomValue (stx.getArg 0) "{" &&
+      isAtomValue (stx.getArg 2) "|" && isAtomValue (stx.getArg 4) "}" &&
+      binder.getKind.toString == extBinderKind && binder.getNumArgs == 2
+  if !wellFormed then
+    some setBuilderKind
+  else
+    let ascription := binder.getArg 1
+    let ascriptionRejected :=
+      if ascription.getNumArgs == 1 && (ascription.getArg 0).getKind.toString == groupKind then
+        let typed := ascription.getArg 0
+        if typed.getNumArgs == 2 && isAtomValue (typed.getArg 0) ":" then
+          firstRejectedSyntax? (typed.getArg 1)
+        else
+          some groupKind
+      else
+        firstRejectedSyntax? ascription
+    firstRejectedSyntax? (binder.getArg 0) <|> ascriptionRejected <|>
+      firstRejectedSyntax? (stx.getArg 3)
+end
 
 private partial def containsAtom (stx : Syntax) (value : String) : Bool :=
   (stx.isAtom && stx.getAtomVal == value) || stx.getArgs.any (containsAtom · value)
@@ -111,8 +210,9 @@ private def parseHeader (env : Environment) (source : String) (admission := fals
   let mut count := 0
   for binder in binderNode.getArgs do
     count := count + (← binderCount binder)
-  if admission && !isAllowedAdmissionSyntax command then
-    throw s!"declaration contains unsupported syntax '{(firstRejectedSyntax? command).getD "unknown"}'"
+  if admission then
+    if let some rejected := firstRejectedSyntax? command then
+      throw s!"declaration contains unsupported syntax '{rejected}'"
   if admission && kind == "theorem" then
     let value := decl.getArg 3
     unless isExactSorryBody value do
@@ -120,6 +220,8 @@ private def parseHeader (env : Environment) (source : String) (admission := fals
     unless countKind command ``Lean.Parser.Term.byTactic == 1 do
       throw "tactics in a theorem signature are not supported"
   else if admission && (containsAtom decl "by" || containsAtom decl "sorry") then
+    -- The `sorry` keyword and `sorryAx` are both rejected: the keyword here, the
+    -- constant by `blockedIdentifier?` in the walk above.
     throw "definition bodies cannot contain tactics or sorry"
   return { name, kind, binderCount := count }
 
