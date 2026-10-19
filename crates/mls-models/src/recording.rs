@@ -112,7 +112,10 @@ impl RecordedError {
                 message: message.clone(),
                 failure: (**failure).clone(),
             },
-            ModelError::Io(_) | ModelError::Json(_) | ModelError::ReplayMismatch => Self::Local {
+            ModelError::Io(_)
+            | ModelError::Json(_)
+            | ModelError::ReplayMismatch
+            | ModelError::RecordingStopped => Self::Local {
                 message: error.to_string(),
             },
         }
@@ -144,6 +147,8 @@ pub struct RecordingClient<C> {
     decision_model: String,
     provenance: String,
     next_index: usize,
+    unpersisted: usize,
+    first_persistence_error: Option<String>,
 }
 
 impl<C> RecordingClient<C> {
@@ -162,35 +167,98 @@ impl<C> RecordingClient<C> {
             decision_model: decision_model.into(),
             provenance: provenance.into(),
             next_index: 0,
+            unpersisted: 0,
+            first_persistence_error: None,
         }
     }
 
+    /// Describe call-record persistence failures, if any occurred.
+    ///
+    /// Provider results are returned to the caller even when their record cannot
+    /// be written, so a run can succeed while its recording is incomplete.
+    /// `Some(..)` means at least one call record is missing and the recording is
+    /// not replayable. Callers must treat `Some(..)` as a failed run after saving
+    /// their report. After the first failure, later calls return
+    /// `ModelError::RecordingStopped` without contacting the inner client.
+    pub fn persistence_failure(&self) -> Option<String> {
+        self.first_persistence_error.as_ref().map(|first| {
+            format!(
+                "{} model call record(s) not persisted; first error: {first}",
+                self.unpersisted
+            )
+        })
+    }
+
+    /// Whether a record failed earlier, so no further live call may be made.
+    fn recording_stopped(&self) -> bool {
+        self.first_persistence_error.is_some()
+    }
+
+    /// Count a failed record write, warning on stderr only for the first one.
+    fn note_persist_result(&mut self, result: Result<(), ModelError>) {
+        let Err(error) = result else {
+            return;
+        };
+        self.unpersisted += 1;
+        if self.first_persistence_error.is_none() {
+            let message = error.to_string();
+            eprintln!("MLS warning: failed to persist model call record: {message}");
+            self.first_persistence_error = Some(message);
+        }
+    }
+
+    /// Publish the next free `call-NNNN.json` record, all-or-nothing.
+    ///
+    /// Occupied names are skipped, so existing records are never overwritten.
+    /// Any other failure returns without advancing `next_index`, so the next call
+    /// retries the same index and the numbering gets no hole from a failed write.
     fn persist(&mut self, call: &RecordedCall) -> Result<(), ModelError> {
         std::fs::create_dir_all(&self.directory).map_err(ModelError::Io)?;
         let bytes = serde_json::to_vec_pretty(call).map_err(ModelError::Json)?;
         loop {
-            let path = self
-                .directory
-                .join(format!("call-{:04}.json", self.next_index));
-            self.next_index += 1;
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write as _;
-                    return file.write_all(&bytes).map_err(ModelError::Io);
+            let name = format!("call-{:04}.json", self.next_index);
+            let partial = self.directory.join(format!(".{name}.partial"));
+            let published = self.directory.join(&name);
+            match publish_record(&partial, &published, &bytes) {
+                Ok(()) => {
+                    self.next_index += 1;
+                    return Ok(());
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // Name taken by a published record (or a stale partial): try the next index.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    self.next_index += 1;
+                }
                 Err(error) => return Err(ModelError::Io(error)),
             }
         }
     }
 }
 
+/// Write `bytes` to a fresh `partial` sibling, sync it, then hard-link it to
+/// `published`. `hard_link` refuses an existing target, so nothing is overwritten
+/// and the record appears under its final name only once it is complete.
+///
+/// If `partial` already exists, nothing is touched and `AlreadyExists` is returned.
+/// Otherwise `partial` is removed on every path; after a successful link the
+/// record survives under `published`. A leftover `.partial` is never a record.
+fn publish_record(partial: &Path, published: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(partial)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = written.and_then(|()| std::fs::hard_link(partial, published));
+    let _ = std::fs::remove_file(partial);
+    result
+}
+
 impl<C: ModelClient> ModelClient for RecordingClient<C> {
     fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
+        if self.recording_stopped() {
+            return Err(ModelError::RecordingStopped);
+        }
         let canonical = generation_request(request, &self.generation_model);
         let started = Instant::now();
         let result = self.inner.generate(request);
@@ -210,11 +278,15 @@ impl<C: ModelClient> ModelClient for RecordingClient<C> {
             result: &result,
             provenance: &self.provenance,
         });
-        self.persist(&call)?;
+        let persisted = self.persist(&call);
+        self.note_persist_result(persisted);
         result
     }
 
     fn decide(&mut self, request: &DecisionRequest) -> Result<DecisionReply, ModelError> {
+        if self.recording_stopped() {
+            return Err(ModelError::RecordingStopped);
+        }
         let canonical = decision_request(request, &self.decision_model);
         let started = Instant::now();
         let result = self.inner.decide(request);
@@ -234,7 +306,8 @@ impl<C: ModelClient> ModelClient for RecordingClient<C> {
             result: &result,
             provenance: &self.provenance,
         });
-        self.persist(&call)?;
+        let persisted = self.persist(&call);
+        self.note_persist_result(persisted);
         result
     }
 }
@@ -317,6 +390,7 @@ impl ReplayClient {
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ModelError::Io)?;
+        // Only `*.json` records count; a `.partial` left by an interrupted write is ignored.
         paths.retain(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "json")

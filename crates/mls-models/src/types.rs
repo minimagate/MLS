@@ -336,4 +336,7 @@ pub enum ModelError {
     /// Replay contained no exact full-request match.
     #[error("no exact replay match for request")]
     ReplayMismatch,
+    /// A previous call record could not be persisted, so no further live call was made.
+    #[error("model call not made: a previous call record could not be persisted")]
+    RecordingStopped,
 }

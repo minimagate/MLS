@@ -7,7 +7,7 @@ use mls_models::{
     RecordedCall, RecordingClient, ReplayClient, Usage,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::mpsc, thread};
+use std::{cell::Cell, collections::BTreeMap, path::PathBuf, rc::Rc, sync::mpsc, thread};
 use tiny_http::{Header, Response, Server, StatusCode};
 
 const GENERATION_MODEL: &str = "anthropic/claude-sonnet-5";
@@ -562,4 +562,279 @@ fn live_openrouter_smoke_explicitly_gated() {
         decision.metadata.usage.cost,
         decision.metadata.latency_ms
     );
+}
+
+/// Fake client whose calls always fail at transport level.
+struct TransportFake;
+
+impl ModelClient for TransportFake {
+    fn generate(&mut self, _: &GenerationRequest) -> Result<GenerationReply, ModelError> {
+        Err(ModelError::Transport("connection reset".into()))
+    }
+
+    fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
+        Err(ModelError::Transport("connection reset".into()))
+    }
+}
+
+/// Create a regular file at a path where a recording directory would be created,
+/// so every call record write fails.
+fn blocked_recording_path(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"not a directory").unwrap();
+    path
+}
+
+#[test]
+fn persistence_failure_keeps_successful_reply_and_counts_records() {
+    let path = blocked_recording_path("mls-models-blocked-success");
+    let mut recorder = RecordingClient::new(
+        FakeClient {
+            generation: Ok(generation_reply()),
+        },
+        &path,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert!(recorder.persistence_failure().is_none());
+    assert_eq!(
+        recorder.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    let failure = recorder.persistence_failure().expect("persistence failure");
+    assert!(failure.contains("1 model call record"), "{failure}");
+    let error = recorder.generate(&generation_request()).unwrap_err();
+    assert!(matches!(error, ModelError::RecordingStopped), "{error}");
+    let failure = recorder.persistence_failure().expect("persistence failure");
+    assert!(failure.contains("1 model call record"), "{failure}");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn persistence_failure_does_not_replace_inner_error() {
+    let path = blocked_recording_path("mls-models-blocked-error");
+    let mut recorder = RecordingClient::new(
+        TransportFake,
+        &path,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    let error = recorder.generate(&generation_request()).unwrap_err();
+    assert!(
+        matches!(&error, ModelError::Transport(message) if message == "connection reset"),
+        "{error}"
+    );
+    let error = recorder.decide(&decision_request()).unwrap_err();
+    assert!(matches!(error, ModelError::RecordingStopped), "{error}");
+    let failure = recorder.persistence_failure().expect("persistence failure");
+    assert!(failure.contains("1 model call record"), "{failure}");
+    std::fs::remove_file(path).unwrap();
+}
+
+/// Fake client that counts every call it receives.
+struct CountingFake {
+    calls: Rc<Cell<usize>>,
+}
+
+impl ModelClient for CountingFake {
+    fn generate(&mut self, _: &GenerationRequest) -> Result<GenerationReply, ModelError> {
+        self.calls.set(self.calls.get() + 1);
+        Ok(generation_reply())
+    }
+
+    fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
+        self.calls.set(self.calls.get() + 1);
+        Err(ModelError::InvalidResponse("synthetic failure".into()))
+    }
+}
+
+#[test]
+fn persistence_failure_stops_later_live_calls() {
+    let path = blocked_recording_path("mls-models-blocked-stop");
+    let calls = Rc::new(Cell::new(0));
+    let mut recorder = RecordingClient::new(
+        CountingFake {
+            calls: Rc::clone(&calls),
+        },
+        &path,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    // The call whose record failed still returns its real result.
+    assert_eq!(
+        recorder.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    assert_eq!(calls.get(), 1);
+
+    let error = recorder.generate(&generation_request()).unwrap_err();
+    assert!(matches!(error, ModelError::RecordingStopped), "{error}");
+    let error = recorder.decide(&decision_request()).unwrap_err();
+    assert!(matches!(error, ModelError::RecordingStopped), "{error}");
+    assert_eq!(calls.get(), 1, "no live call after a persistence failure");
+    let failure = recorder.persistence_failure().expect("persistence failure");
+    assert!(failure.contains("1 model call record"), "{failure}");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn healthy_recording_reports_no_persistence_failure() {
+    let directory = std::env::temp_dir().join(format!("mls-models-healthy-{}", std::process::id()));
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+    let mut recorder = RecordingClient::new(
+        FakeClient {
+            generation: Ok(generation_reply()),
+        },
+        &directory,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert_eq!(
+        recorder.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    assert!(recorder.persistence_failure().is_none());
+    assert!(directory.join("call-0000.json").is_file());
+    assert!(partial_records(&directory).is_empty());
+    let mut replay =
+        ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
+    assert_eq!(
+        replay.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Names of leftover `.partial` files in a recording directory.
+fn partial_records(directory: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".partial"))
+        .collect()
+}
+
+#[test]
+fn occupied_record_name_is_skipped_without_overwrite_or_partial() {
+    let directory =
+        std::env::temp_dir().join(format!("mls-models-occupied-{}", std::process::id()));
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("call-0000.json"), b"existing record").unwrap();
+    let mut recorder = RecordingClient::new(
+        FakeClient {
+            generation: Ok(generation_reply()),
+        },
+        &directory,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert_eq!(
+        recorder.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    assert!(recorder.persistence_failure().is_none());
+    assert_eq!(
+        std::fs::read(directory.join("call-0000.json")).unwrap(),
+        b"existing record"
+    );
+    assert!(directory.join("call-0001.json").is_file());
+    assert!(partial_records(&directory).is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn failed_record_create_keeps_reply_leaves_no_partial_and_stops_recording() {
+    let directory =
+        std::env::temp_dir().join(format!("mls-models-readonly-{}", std::process::id()));
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+    std::fs::create_dir_all(&directory).unwrap();
+    let set_writable = |writable: bool| {
+        let mut permissions = std::fs::metadata(&directory).unwrap().permissions();
+        permissions.set_readonly(!writable);
+        std::fs::set_permissions(&directory, permissions).unwrap();
+    };
+    set_writable(false);
+    // Privileged processes ignore directory permissions; the failure cannot be simulated there.
+    let privileged = std::fs::write(directory.join("probe"), b"").is_ok();
+    if privileged {
+        let _ = std::fs::remove_file(directory.join("probe"));
+        set_writable(true);
+        std::fs::remove_dir_all(directory).unwrap();
+        return;
+    }
+
+    let mut recorder = RecordingClient::new(
+        FakeClient {
+            generation: Ok(generation_reply()),
+        },
+        &directory,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert_eq!(
+        recorder.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    let failure = recorder.persistence_failure().expect("persistence failure");
+    assert!(failure.contains("1 model call record"), "{failure}");
+
+    set_writable(true);
+    assert!(partial_records(&directory).is_empty());
+    assert!(!directory.join("call-0000.json").exists());
+    // The recorder stopped after the failed write, so the next call makes no live request
+    // and writes no record, even though the directory is writable again.
+    let error = recorder.generate(&generation_request()).unwrap_err();
+    assert!(matches!(error, ModelError::RecordingStopped), "{error}");
+    assert!(!directory.join("call-0000.json").exists());
+    assert!(!directory.join("call-0001.json").exists());
+    assert!(partial_records(&directory).is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn replay_ignores_stray_partial_records() {
+    let directory = std::env::temp_dir().join(format!("mls-models-stray-{}", std::process::id()));
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+    let mut recorder = RecordingClient::new(
+        FakeClient {
+            generation: Ok(generation_reply()),
+        },
+        &directory,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert_eq!(
+        recorder.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    std::fs::write(
+        directory.join(".call-0001.json.partial"),
+        b"{\"version\": 1, \"tru",
+    )
+    .unwrap();
+    let mut replay =
+        ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
+    assert_eq!(
+        replay.generate(&generation_request()).unwrap(),
+        generation_reply()
+    );
+    std::fs::remove_dir_all(directory).unwrap();
 }
