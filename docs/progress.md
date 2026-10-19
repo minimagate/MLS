@@ -4,15 +4,15 @@ The authoritative requirements are in [spec.md](spec.md). Milestones are sequent
 unchecked items are not complete. The parent agent owns design and acceptance;
 focused implementation, investigation, and independent review use separate agents.
 
-## M1 — Parser CLI (active)
+## M1 — Parser CLI (complete)
 - [x] Inspect workspace, preserve specification, check available tooling.
 - [x] Investigate native TeXmacs syntax and persistent block metadata.
-- [ ] Implement workspace, block types, source hashing, explicit dependencies.
-- [ ] Implement lossless TeXmacs parser and stable ID persistence.
-- [ ] Implement parser CLI with explicit file-writing option.
-- [ ] Add unit, property, golden corpus, and CLI integration tests.
-- [ ] Run formatting, lint, full offline test command; resolve independent review.
-- [ ] Document build/run/test and decisions; commit tested tasks.
+- [x] Implement workspace, block types, source hashing, explicit dependencies.
+- [x] Implement lossless TeXmacs parser and stable ID persistence.
+- [x] Implement parser CLI with explicit file-writing option.
+- [x] Add unit, property, golden corpus, and CLI integration tests.
+- [x] Run formatting, lint, full offline test command; resolve independent review.
+- [x] Document build/run/test and decisions; commit tested tasks.
 
 ## M2 — Batch statements (not started)
 - [ ] Research actual provider model availability, Lean REPL and pinned Mathlib.

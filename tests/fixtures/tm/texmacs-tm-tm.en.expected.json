@@ -1,0 +1,223 @@
+{
+  "blocks": [
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 71,
+      "source_end": 106
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 110,
+      "source_end": 482
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 486,
+      "source_end": 634
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 638,
+      "source_end": 958
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 962,
+      "source_end": 1003
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1007,
+      "source_end": 1199
+    },
+    {
+      "kind": "equation",
+      "label": "gen-tree-tm",
+      "deps": [],
+      "source_start": 1203,
+      "source_end": 1290
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1294,
+      "source_end": 1310
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1314,
+      "source_end": 1404
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1408,
+      "source_end": 1755
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1759,
+      "source_end": 1981
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [
+        6
+      ],
+      "source_start": 1985,
+      "source_end": 2309
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 2313,
+      "source_end": 2527
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 2531,
+      "source_end": 2900
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 2904,
+      "source_end": 2942
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 2946,
+      "source_end": 3172
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 3176,
+      "source_end": 3282
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 3286,
+      "source_end": 3421
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 3425,
+      "source_end": 3544
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 3548,
+      "source_end": 3564
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 3568,
+      "source_end": 3782
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 3786,
+      "source_end": 4092
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 4096,
+      "source_end": 4358
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 4362,
+      "source_end": 4542
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 4546,
+      "source_end": 4567
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 4571,
+      "source_end": 4749
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 4753,
+      "source_end": 4855
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 4859,
+      "source_end": 4969
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 4973,
+      "source_end": 5016
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 5020,
+      "source_end": 5423
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "unresolved_reference",
+      "source_start": 439,
+      "source_end": 461
+    }
+  ]
+}

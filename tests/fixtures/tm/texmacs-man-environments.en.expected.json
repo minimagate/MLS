@@ -1,0 +1,68 @@
+{
+  "blocks": [
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 93,
+      "source_end": 119
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 123,
+      "source_end": 530
+    },
+    {
+      "kind": "theorem",
+      "label": null,
+      "deps": [],
+      "source_start": 534,
+      "source_end": 720
+    },
+    {
+      "kind": "proof",
+      "label": null,
+      "deps": [],
+      "source_start": 724,
+      "source_end": 796
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 800,
+      "source_end": 1174
+    },
+    {
+      "kind": "theorem",
+      "label": null,
+      "deps": [],
+      "source_start": 1178,
+      "source_end": 1299
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1303,
+      "source_end": 1739
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1743,
+      "source_end": 1792
+    },
+    {
+      "kind": "commentary",
+      "label": null,
+      "deps": [],
+      "source_start": 1796,
+      "source_end": 2199
+    }
+  ],
+  "diagnostics": []
+}

@@ -31,3 +31,26 @@ Investigated sources: [native format](https://www.texmacs.org/tmweb/manual/webma
 [upstream parser](https://raw.githubusercontent.com/texmacs/texmacs/master/src/Data/Convert/Texmacs/fromtm.cpp),
 [variable scope](https://www.texmacs.org/tmweb/manual/webman-styling.en.html), and
 [linking primitives](https://www.texmacs.org/tmweb/manual/webman-primitives.en.html).
+
+## 2026-10-19 — M1 boundaries and persistence policy
+Context: block identity must survive edits without corrupting native structure.
+Choice: emit rendered paragraphs and tagged blocks in source order, retaining
+inline formatting and references in their owning paragraph. Recognize starred
+environments and retain section markers as an additional block kind for future
+shadow-file grouping. Ignore preamble/control arguments for extraction.
+Why: source-order ownership avoids duplicated blocks and keeps dependencies
+attached to the mathematical text that uses them.
+
+Read-only runs assign transient UUIDs; `--write-ids` persists them using native
+long `with` carriers. Invalid or duplicate existing IDs produce diagnostics and
+block writeback rather than silently adding nested replacement carriers. Multiple
+labels on one block are aliases; ambiguous labels do not create dependency edges.
+Native source bytes, including Cork text, are preserved. Non-UTF-8 labels are not
+linked in M1; this restriction is documented in the README.
+
+The writer preserves paragraph separators and complete escape atoms. It rejects
+crossing insertion spans, reparses the proposed output before replacement, uses
+an exclusive temporary file with failure cleanup, preserves permissions, and
+checks for a changed source before replacement. Symlink write targets are refused
+to avoid replacing the link rather than the document. The protocol/plugin will
+handle editing in memory in later milestones; M1 is an explicit batch tool.

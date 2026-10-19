@@ -1,0 +1,2 @@
+# Preserve the vendored license verbatim, including its trailing blank lines.
+tests/fixtures/tm/GFDL-1.1.txt whitespace=-blank-at-eof
