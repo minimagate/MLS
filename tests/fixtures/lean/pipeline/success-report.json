@@ -1,0 +1,150 @@
+{
+  "diagnostics": [],
+  "blocks": [
+    {
+      "block_id": "00000000-0000-4000-8000-000000000001",
+      "label": "thm:first",
+      "source_start": 95,
+      "source_end": 144,
+      "status": "sir_drafted",
+      "sir": {
+        "kind": "theorem",
+        "label": "thm:first",
+        "variables": [],
+        "hypotheses": [],
+        "conclusion": "truth",
+        "uses": [],
+        "assumptions_made": []
+      },
+      "lean_statement": "theorem mls_00000000_0000_4000_8000_000000000001 : True := by sorry",
+      "elaborated": true,
+      "complete_structure": false,
+      "accepted_speculatively": true,
+      "checks": [
+        {
+          "field": "declaration",
+          "state": "matched",
+          "detail": "expected mls_00000000_0000_4000_8000_000000000001, got mls_00000000_0000_4000_8000_000000000001",
+          "hard": true,
+          "scope": "structure"
+        },
+        {
+          "field": "kind",
+          "state": "matched",
+          "detail": "expected theorem, got theorem",
+          "hard": true,
+          "scope": "structure"
+        },
+        {
+          "field": "binder_count",
+          "state": "matched",
+          "detail": "expected 0, got 0",
+          "hard": true,
+          "scope": "structure"
+        },
+        {
+          "field": "goal.outer_head",
+          "state": "unchecked",
+          "detail": "SIR conclusion has no independently recognized outer head",
+          "hard": false,
+          "scope": "structure"
+        },
+        {
+          "field": "goal.content",
+          "state": "unchecked",
+          "detail": "semi-formal conclusion content is not a proof of Lean equivalence",
+          "hard": false,
+          "scope": "semantics"
+        },
+        {
+          "field": "theorem.admission",
+          "state": "matched",
+          "detail": "M2 theorem must use the admitted statement body",
+          "hard": true,
+          "scope": "structure"
+        }
+      ],
+      "attempts": 1,
+      "errors": [],
+      "lean_diagnostics": []
+    },
+    {
+      "block_id": "00000000-0000-4000-8000-000000000002",
+      "label": "thm:second",
+      "source_start": 224,
+      "source_end": 305,
+      "status": "sir_drafted",
+      "sir": {
+        "kind": "theorem",
+        "label": "thm:second",
+        "variables": [],
+        "hypotheses": [],
+        "conclusion": "truth",
+        "uses": [
+          "thm:first"
+        ],
+        "assumptions_made": []
+      },
+      "lean_statement": "theorem mls_00000000_0000_4000_8000_000000000002 : True := by sorry",
+      "elaborated": true,
+      "complete_structure": false,
+      "accepted_speculatively": true,
+      "checks": [
+        {
+          "field": "declaration",
+          "state": "matched",
+          "detail": "expected mls_00000000_0000_4000_8000_000000000002, got mls_00000000_0000_4000_8000_000000000002",
+          "hard": true,
+          "scope": "structure"
+        },
+        {
+          "field": "kind",
+          "state": "matched",
+          "detail": "expected theorem, got theorem",
+          "hard": true,
+          "scope": "structure"
+        },
+        {
+          "field": "binder_count",
+          "state": "matched",
+          "detail": "expected 0, got 0",
+          "hard": true,
+          "scope": "structure"
+        },
+        {
+          "field": "goal.outer_head",
+          "state": "unchecked",
+          "detail": "SIR conclusion has no independently recognized outer head",
+          "hard": false,
+          "scope": "structure"
+        },
+        {
+          "field": "goal.content",
+          "state": "unchecked",
+          "detail": "semi-formal conclusion content is not a proof of Lean equivalence",
+          "hard": false,
+          "scope": "semantics"
+        },
+        {
+          "field": "theorem.admission",
+          "state": "matched",
+          "detail": "M2 theorem must use the admitted statement body",
+          "hard": true,
+          "scope": "structure"
+        }
+      ],
+      "attempts": 1,
+      "errors": [],
+      "lean_diagnostics": []
+    }
+  ],
+  "usage": {
+    "calls": 4,
+    "input_tokens": 40,
+    "output_tokens": 20,
+    "unknown_input_token_calls": 0,
+    "unknown_output_token_calls": 0,
+    "known_cost": 0.04,
+    "unknown_cost_calls": 0
+  }
+}

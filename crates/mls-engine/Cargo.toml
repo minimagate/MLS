@@ -1,0 +1,22 @@
+[package]
+name = "mls-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mls-core = { path = "../mls-core" }
+mls-lean = { path = "../mls-lean" }
+mls-models = { path = "../mls-models" }
+mls-sir = { path = "../mls-sir" }
+mls-tm = { path = "../mls-tm" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

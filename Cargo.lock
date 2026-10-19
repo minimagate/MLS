@@ -769,6 +769,9 @@ name = "mls-cli"
 version = "0.1.0"
 dependencies = [
  "mls-core",
+ "mls-engine",
+ "mls-lean",
+ "mls-models",
  "mls-tm",
  "serde",
  "serde_json",
@@ -782,6 +785,21 @@ dependencies = [
  "serde",
  "sha2",
  "uuid",
+]
+
+[[package]]
+name = "mls-engine"
+version = "0.1.0"
+dependencies = [
+ "mls-core",
+ "mls-lean",
+ "mls-models",
+ "mls-sir",
+ "mls-tm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
