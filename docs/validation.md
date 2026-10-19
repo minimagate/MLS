@@ -60,3 +60,17 @@ syntax before replacing the source. Native export comparison similarly caught
 paragraph separators being absorbed into wrappers; the final comparison passes.
 These checks establish M1 behavior only. No Lean/model/plugin capability has yet
 been validated.
+
+## 2026-10-19 — M2 SIR task acceptance
+
+The isolated `mls-sir` task passed independent review after fixing quoted-content
+and source-label hash collisions. Its 11 unit tests and 2 property tests pass;
+reviewer probes also checked literal whitespace, exact identities, malformed
+wire values and mandatory-nullable labels. See [SIR review](reviews/m2-sir.md).
+
+To validate the exact incremental commit while the model adapter was changing
+the shared workspace, the parent created a disposable copy of M1 commit
+`6a10a97`, added the final SIR source and its workspace membership, and regenerated
+the lockfile offline. The lockfile delta contains only the new SIR package.
+`make test` in that exact snapshot passed formatting, Clippy and all **47** tests
+(34 M1 + 13 SIR). This establishes the SIR task, not the entire M2 milestone.

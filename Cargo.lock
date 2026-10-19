@@ -291,6 +291,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mls-sir"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "mls-tm"
 version = "0.1.0"
 dependencies = [

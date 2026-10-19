@@ -1,0 +1,13 @@
+{
+  "kind": "theorem",
+  "label": "thm:cont-bounded",
+  "variables": [
+    {"name": "f", "type": "function ℝ → ℝ"},
+    {"name": "a", "type": "real"},
+    {"name": "b", "type": "real"}
+  ],
+  "hypotheses": ["a ≤ b", "f is continuous on [a, b]"],
+  "conclusion": "∃ M, ∀ x ∈ [a, b], |f x| ≤ M",
+  "uses": ["def:continuous"],
+  "assumptions_made": ["interval is closed (text says 'the interval')"]
+}

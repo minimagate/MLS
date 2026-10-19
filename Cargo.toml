@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mls-core", "crates/mls-tm", "crates/mls-cli"]
+members = ["crates/mls-core", "crates/mls-tm", "crates/mls-sir", "crates/mls-cli"]
 resolver = "2"
 
 [workspace.package]

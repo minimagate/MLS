@@ -36,4 +36,7 @@ Run formatting, lint, unit, property, and CLI integration checks with:
 make test
 ```
 
-Later milestones are intentionally not implemented yet.
+M2 is in development. Its validated `mls-sir` library provides strict statement
+schemas, semantic hashes, and field diffs; the batch formalization command is not
+ready yet. Progress and executed evidence are tracked in [docs/progress.md](docs/progress.md)
+and [docs/validation.md](docs/validation.md).
