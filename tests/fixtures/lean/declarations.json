@@ -1,0 +1,7 @@
+{
+  "sorry_base": "theorem sorry_base (n : Nat) : n = n := by sorry",
+  "dependent": "theorem dependent (n : Nat) : n = n := sorry_base n",
+  "trusted": "theorem trusted (n : Nat) : n = n := by rfl",
+  "shape": "theorem shape {\u03b1 : Type} (f : \u03b1 \u2192 \u03b1) (P : Prop) (h : P) [Nonempty \u03b1] : \u2200 x : \u03b1, \u2203 y : \u03b1, y = f x := by sorry",
+  "function_definition": "def function_definition (n : Nat) : Nat \u2192 Nat := fun x => n + x"
+}

@@ -83,3 +83,36 @@ the conclusion and arrows in a function result type. Structural checking cannot
 certify arbitrary semi-formal prose equivalence. Unsupported comparisons must be
 reported as unchecked, and definition bodies must be inspected separately from
 their result types. No count-only check is evidence of complete faithfulness.
+
+## 2026-10-19 — Candidate Lean environments and model source admission
+Context: Lean error recovery may create declarations even when elaboration fails,
+and a successfully elaborated declaration may still disagree with its SIR.
+Choice: keep checked candidates separate and advance the worker's accepted
+environment only after the caller accepts all required structural checks.
+Repairs branch from the previous accepted environment. Trusted Lean parsing must
+validate one restricted declaration before executing generated source; model
+statements cannot supply extra commands or arbitrary elaboration tactics.
+Why: failed or mismatched candidates must not affect later declarations.
+
+## 2026-10-19 — M2 evaluation interpretation
+Context: a small prototype corpus cannot establish general autoformalization
+quality, and the semi-formal SIR admits equivalent wording.
+Choice: start with ten explicitly specialized, source-attributed teaching
+examples in `evals/`, with reviewed reference SIRs excluded from model inputs.
+Report elaboration, supported structural checks, unchecked content, exact SIR
+agreement and cost separately. Why: neither compilation nor exact wording alone
+establishes faithfulness. Broader course-note coverage remains a limitation to
+state in the M2 go/no-go report.
+
+## 2026-10-19 — Pinned interpreter runtime on this host
+Context: binaries linked with the pinned Lean release fail macOS dyld validation
+on this host (`__DATA_CONST` lacks `SG_READ_ONLY`), including the REPL and Mathlib
+cache helper. Choice: run the same pinned modules using official Lean `--run`;
+keep a persistent REPL process and use the interpreter for cache downloads.
+Why: this preserves the checked toolchain and protocol without changing upstream
+binaries or silently upgrading Lean/Mathlib. Setup is currently Apple Silicon
+macOS-specific. All downloads and caches remain repository-local and ignored.
+
+The shadow generator rejects cycles between section modules, even when a block
+graph could be linearized by splitting sections. This conservative M2 limitation
+avoids invalid import cycles; section splitting is not inferred silently.

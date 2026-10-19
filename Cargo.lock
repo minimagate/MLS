@@ -785,6 +785,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mls-lean"
+version = "0.1.0"
+dependencies = [
+ "mls-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mls-models"
 version = "0.1.0"
 dependencies = [

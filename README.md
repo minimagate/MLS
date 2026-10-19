@@ -54,3 +54,25 @@ Missing cost or confidence remains unknown; it is never silently treated as zero
 or certainty. The batch formalization command is not ready yet. Progress and
 executed evidence are tracked in [docs/progress.md](docs/progress.md) and
 [docs/validation.md](docs/validation.md).
+
+The local Lean integration currently targets Apple Silicon macOS. Install the
+pinned Lean 4.19.0, Mathlib and community REPL under ignored repository-local
+directories, then run the real integration suite:
+
+```sh
+make setup-lean
+make test-lean
+```
+
+Setup downloads the official Lean archive and Mathlib's compiled cache; it does
+not change shell startup files. The launcher uses the pinned REPL through Lean's
+interpreter because this host rejects its natively linked executable. The REPL
+remains one persistent process with Mathlib imported once. Other platforms need
+a corresponding runtime installation path; they are not supported by this setup
+script yet.
+
+`mls-lean` exposes candidate environments that callers must explicitly accept
+after structural checks. Its generated-source admission grammar is deliberately
+restricted; unsupported syntax is an error. Shadow sections use validated module
+names and dependency order. If interleaved dependencies create a cycle between
+whole sections, generation rejects it rather than emitting invalid Lean imports.

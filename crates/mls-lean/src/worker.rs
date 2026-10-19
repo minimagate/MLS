@@ -1,0 +1,318 @@
+//! Transactional statement checking on branches of accepted Lean environments.
+
+use crate::{ReplConfig, ReplDiagnostic, ReplError, protocol::ReplProcess};
+use mls_core::BlockId;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const EXTRACT_PREFIX: &str = "MLS_EXTRACT:";
+const VALIDATE_PREFIX: &str = "MLS_VALIDATE:";
+static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One generated declaration submitted for checking.
+#[derive(Clone, Debug)]
+pub struct StatementRequest<'a> {
+    /// Stable block identity used in generated comments and diagnostics.
+    pub block_id: BlockId,
+    /// Exact expected Lean declaration name.
+    pub declaration_name: &'a str,
+    /// Exactly one theorem or definition declaration.
+    pub source: &'a str,
+}
+
+/// Trusted parse-only description of admitted source.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct Validation {
+    /// Parsed declaration name.
+    pub declaration: String,
+    /// `theorem` or `definition`.
+    pub kind: String,
+}
+
+/// One elaborated binder from the trusted extractor.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct Binder {
+    /// User-facing binder name.
+    pub name: String,
+    /// Pretty-printed type, for diagnostics only.
+    #[serde(rename = "type")]
+    pub type_text: String,
+    /// Whether the binder type is proposition-valued.
+    pub is_proposition: bool,
+    /// Lean binder class.
+    pub binder_info: String,
+}
+
+/// Trusted structural data extracted from the compiled declaration.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct ExtractedDeclaration {
+    /// Compiled constant name.
+    pub declaration: String,
+    /// Compiled declaration kind.
+    pub kind: String,
+    /// Header binders only.
+    pub binders: Vec<Binder>,
+    /// Pretty-printed conclusion/result type.
+    pub goal: String,
+    /// Conservative outer syntax class of the goal.
+    pub goal_outer_head: String,
+    /// Transitive axioms used by the declaration.
+    pub axioms: Vec<String>,
+    /// Whether transitive trust includes `sorryAx`.
+    pub has_sorry: bool,
+    /// Definition body, when checking a definition.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Conservative body head, when checking a definition.
+    #[serde(default)]
+    pub body_outer_head: Option<String>,
+}
+
+/// A successfully checked but still uncommitted statement result.
+#[derive(Debug)]
+pub struct CheckResult {
+    /// Opaque environment candidate. Accept it only after caller-side structural checks pass.
+    pub candidate: CandidateEnvironment,
+    /// Trusted source validation result.
+    pub validation: Validation,
+    /// Trusted compiled structure.
+    pub extracted: ExtractedDeclaration,
+    /// Non-error Lean messages, including the extractor info message.
+    pub messages: Vec<ReplDiagnostic>,
+}
+
+/// An uncommitted environment produced from a specific accepted snapshot.
+#[derive(Debug)]
+pub struct CandidateEnvironment {
+    environment: u64,
+    parent_environment: u64,
+    generation: u64,
+    worker_id: u64,
+}
+
+/// A rejected check; the worker's committed environment remains unchanged.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerError {
+    /// Transport or outer REPL protocol failure.
+    #[error(transparent)]
+    Repl(#[from] ReplError),
+    /// Lean emitted one or more error diagnostics.
+    #[error("Lean rejected the request")]
+    Diagnostics(Vec<ReplDiagnostic>),
+    /// A trusted payload was absent, duplicated, malformed, or inconsistent.
+    #[error("invalid trusted {stage} payload: {message}")]
+    TrustedPayload {
+        /// Validation, extraction, or response decoding stage.
+        stage: &'static str,
+        /// Specific invariant violation.
+        message: String,
+    },
+    /// The REPL omitted its environment snapshot.
+    #[error("Lean REPL response omitted numeric env")]
+    MissingEnvironment,
+    /// The candidate was not produced from the worker's current accepted state.
+    #[error("candidate environment is stale or belongs to another accepted snapshot")]
+    StaleCandidate,
+    /// The requested declaration name is outside MLS's generated identifier subset.
+    #[error("declaration name must match mls_[a-z0-9_]+")]
+    InvalidDeclarationName,
+}
+
+/// A persistent initialized Lean worker with transactional snapshots.
+pub struct LeanWorker {
+    repl: ReplProcess,
+    base_environment: u64,
+    accepted_environment: u64,
+    generation: u64,
+    worker_id: u64,
+}
+
+impl LeanWorker {
+    /// Spawn the REPL and import the fixed trusted baseline exactly once.
+    pub fn spawn(config: ReplConfig) -> Result<Self, WorkerError> {
+        let mut repl = ReplProcess::spawn(config)?;
+        let response = repl.request(&json!({
+            "cmd": "import Mathlib\nimport MlsExtract\nset_option autoImplicit false"
+        }))?;
+        let messages = messages(&response)?;
+        reject_errors(messages)?;
+        let environment = environment(&response)?;
+        Ok(Self {
+            repl,
+            base_environment: environment,
+            accepted_environment: environment,
+            generation: 0,
+            worker_id: NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed),
+        })
+    }
+
+    /// Return the last fully accepted environment snapshot.
+    #[must_use]
+    pub const fn accepted_environment(&self) -> u64 {
+        self.accepted_environment
+    }
+
+    /// Reset future checks to the import-only baseline.
+    pub fn reset_to_base(&mut self) {
+        self.accepted_environment = self.base_environment;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Commit a candidate after the caller has completed all mechanical SIR checks.
+    pub fn accept(&mut self, candidate: CandidateEnvironment) -> Result<u64, WorkerError> {
+        if candidate.parent_environment != self.accepted_environment
+            || candidate.generation != self.generation
+            || candidate.worker_id != self.worker_id
+        {
+            return Err(WorkerError::StaleCandidate);
+        }
+        self.accepted_environment = candidate.environment;
+        self.generation = self.generation.wrapping_add(1);
+        Ok(self.accepted_environment)
+    }
+
+    /// Validate, elaborate, and extract one declaration without committing its snapshot.
+    pub fn check_statement(
+        &mut self,
+        request: StatementRequest<'_>,
+    ) -> Result<CheckResult, WorkerError> {
+        if request.source.contains('\0') {
+            return Err(payload_error("validation", "NUL bytes are forbidden"));
+        }
+        if !valid_declaration_name(request.declaration_name) {
+            return Err(WorkerError::InvalidDeclarationName);
+        }
+        let validation_response = self.repl.request(&json!({
+            "env": self.accepted_environment,
+            "cmd": format!("#mls_validate_source {} from_source {}", request.declaration_name, lean_string(request.source)),
+        }))?;
+        let validation_messages = messages(&validation_response)?;
+        reject_errors(validation_messages.clone())?;
+        let validation: Validation =
+            unique_payload(&validation_messages, VALIDATE_PREFIX, "validation")?;
+        if validation.declaration != request.declaration_name {
+            return Err(payload_error(
+                "validation",
+                "declaration name does not match request",
+            ));
+        }
+        if validation.kind != "theorem" && validation.kind != "definition" {
+            return Err(payload_error("validation", "unsupported declaration kind"));
+        }
+
+        let command = format!(
+            "-- block:{}\n{}\n#mls_extract {} from_source {}",
+            request.block_id,
+            request.source,
+            request.declaration_name,
+            lean_string(request.source)
+        );
+        let response = self
+            .repl
+            .request(&json!({ "env": self.accepted_environment, "cmd": command }))?;
+        let response_messages = messages(&response)?;
+        reject_errors(response_messages.clone())?;
+        let extracted: ExtractedDeclaration =
+            unique_payload(&response_messages, EXTRACT_PREFIX, "extraction")?;
+        if extracted.declaration != request.declaration_name || extracted.kind != validation.kind {
+            return Err(payload_error(
+                "extraction",
+                "payload identity differs from validated source",
+            ));
+        }
+        let next_environment = environment(&response)?;
+        let candidate = CandidateEnvironment {
+            environment: next_environment,
+            parent_environment: self.accepted_environment,
+            generation: self.generation,
+            worker_id: self.worker_id,
+        };
+        Ok(CheckResult {
+            candidate,
+            validation,
+            extracted,
+            messages: response_messages,
+        })
+    }
+}
+
+fn valid_declaration_name(name: &str) -> bool {
+    name.strip_prefix("mls_").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    })
+}
+
+fn environment(response: &Value) -> Result<u64, WorkerError> {
+    response
+        .get("env")
+        .and_then(Value::as_u64)
+        .ok_or(WorkerError::MissingEnvironment)
+}
+
+fn messages(response: &Value) -> Result<Vec<ReplDiagnostic>, WorkerError> {
+    serde_json::from_value(
+        response
+            .get("messages")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|error| payload_error("response", &error.to_string()))
+}
+
+fn reject_errors(messages: Vec<ReplDiagnostic>) -> Result<(), WorkerError> {
+    let errors: Vec<_> = messages
+        .into_iter()
+        .filter(|message| message.severity == crate::Severity::Error)
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(WorkerError::Diagnostics(errors))
+    }
+}
+
+fn unique_payload<T: for<'de> Deserialize<'de>>(
+    messages: &[ReplDiagnostic],
+    prefix: &str,
+    stage: &'static str,
+) -> Result<T, WorkerError> {
+    let payloads: Vec<_> = messages
+        .iter()
+        .filter(|message| message.severity == crate::Severity::Info)
+        .filter_map(|message| message.data.strip_prefix(prefix))
+        .collect();
+    if payloads.len() != 1 {
+        return Err(payload_error(
+            stage,
+            &format!("expected one {prefix} info message, got {}", payloads.len()),
+        ));
+    }
+    serde_json::from_str(payloads[0]).map_err(|error| payload_error(stage, &error.to_string()))
+}
+
+fn payload_error(stage: &'static str, message: &str) -> WorkerError {
+    WorkerError::TrustedPayload {
+        stage,
+        message: message.to_owned(),
+    }
+}
+
+fn lean_string(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}

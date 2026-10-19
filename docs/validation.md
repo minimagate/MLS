@@ -100,3 +100,37 @@ The exact model-adapter commit snapshot passed `make test`: formatting, strict
 Clippy and 58 test entries (including the live-gated entry, which made no network
 call in that run). The separate two-call live smoke above also passed. Parallel
 Lean work was excluded from this snapshot and is not covered by this acceptance.
+
+## 2026-10-19 — M2 Lean runtime and worker acceptance
+
+Independent [Lean review](reviews/m2-lean.md) approved the scoped runtime and
+worker after fixes for executable term admission, shadow metadata injection and
+unbounded unterminated stdout reads. Five Rust unit and six subprocess tests
+passed, along with strict Clippy. `make test-lean` rebuilt the trusted extractor
+and passed four real persistent-REPL Python tests plus the real Rust worker test.
+
+The real suite checks parsed header boundaries, universal conclusions, function
+result types and definition bodies, proposition variables versus hypotheses and
+instances, direct/transitive `sorryAx`, clean trusted proofs, failed branches and
+repair. Parse-only admission rejects appended commands, effectful elaborators,
+tactics in types and non-placeholder theorem bodies. Explicitly supported real
+number arithmetic and boundedness definitions pass. Independent probes also
+confirmed Unicode diagnostic columns. Unsupported syntax is rejected, not
+silently accepted.
+
+Lean 4.19.0, Mathlib and REPL pins match the investigation. The official downloaded
+archive's local SHA-256 is
+`09f5534815844869414274628b8dfa86be0a20df2d38c2a615e9afc0b06536c0`;
+this is repeatability evidence, not an upstream published digest. The native
+linked executable fails this host's dyld checks; the tested launcher runs the
+same compiled pinned REPL module through official Lean's interpreter. It stays
+persistent and imports Mathlib once. No pipeline, SIR equivalence or proof-status
+acceptance is implied by these component tests.
+
+The exact incremental runtime/worker commit snapshot passed `make test` (70
+test entries, including two inactive live/runtime gates) and `make test-lean`
+(four real Python cases and one real Rust case). A separate `lake build Shadow`
+probe compiled two generated section modules with a dependency import. The
+versioned Lake template declares the Shadow submodule target; setup creates its
+directory. The proof-placeholder warning was expected. Parallel batch-engine
+changes were excluded from the snapshot.
