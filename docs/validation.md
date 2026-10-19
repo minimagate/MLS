@@ -74,3 +74,29 @@ the shared workspace, the parent created a disposable copy of M1 commit
 the lockfile offline. The lockfile delta contains only the new SIR package.
 `make test` in that exact snapshot passed formatting, Clippy and all **47** tests
 (34 M1 + 13 SIR). This establishes the SIR task, not the entire M2 milestone.
+
+## 2026-10-19 — M2 model adapter acceptance
+
+The adapter passed independent review after resolving failed-call accounting,
+credential reflection, replay validation, resolved-model identity and recording
+overwrite findings. See [model review](reviews/m2-models.md). Eleven adapter tests
+cover schema validation, typed decisions, synthetic replay, malformed outputs,
+HTTP failures, redaction, log append and metadata consistency. The live test is
+explicitly gated and returns without calling a provider in ordinary test runs.
+
+The parent ran `MLS_LIVE=1 cargo test -p mls-models
+live_openrouter_smoke_explicitly_gated -- --nocapture`; it passed both real calls:
+
+- Sonnet resolved to `anthropic/claude-sonnet-5`: 201 input / 12 output tokens,
+  reported cost $0.000522, transport latency 1576 ms.
+- Jev resolved to `typesafe/jev-1.14-20261014`: 345 input / 49 output tokens,
+  reported cost $0.00001449, transport latency 313 ms.
+
+Total provider-reported cost was $0.00053649. Sanitized records remain local at
+`.mls/log/live-smoke/25511-1792442239096/`; no credential was printed or committed.
+These calls validate provider integration only, not autoformalization quality.
+
+The exact model-adapter commit snapshot passed `make test`: formatting, strict
+Clippy and 58 test entries (including the live-gated entry, which made no network
+call in that run). The separate two-call live smoke above also passed. Parallel
+Lean work was excluded from this snapshot and is not covered by this acceptance.

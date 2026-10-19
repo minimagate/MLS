@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mls-core", "crates/mls-tm", "crates/mls-sir", "crates/mls-cli"]
+members = ["crates/mls-core", "crates/mls-tm", "crates/mls-sir", "crates/mls-models", "crates/mls-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -11,6 +11,7 @@ rust-version = "1.99"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [workspace.lints.rust]

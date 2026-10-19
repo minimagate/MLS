@@ -36,7 +36,21 @@ Run formatting, lint, unit, property, and CLI integration checks with:
 make test
 ```
 
-M2 is in development. Its validated `mls-sir` library provides strict statement
-schemas, semantic hashes, and field diffs; the batch formalization command is not
-ready yet. Progress and executed evidence are tracked in [docs/progress.md](docs/progress.md)
-and [docs/validation.md](docs/validation.md).
+M2 is in development. `mls-sir` provides validated statement schemas, semantic
+hashes, and field diffs. `mls-models` provides configured OpenRouter generation
+and typed Jev decisions, auditable recordings, and strict offline replay. Model
+IDs and request limits live in `config/models.json`. Tests use synthetic fixtures
+and loopback transport mocks by default; they make no provider calls.
+
+An explicit live smoke test makes one small generation request and one decisions
+request using an existing `OPENROUTER_API_KEY` environment variable:
+
+```sh
+MLS_LIVE=1 cargo test -p mls-models live_openrouter_smoke_explicitly_gated -- --nocapture
+```
+
+Sanitized call records are stored under ignored `.mls/log/live-smoke/` directories.
+Missing cost or confidence remains unknown; it is never silently treated as zero
+or certainty. The batch formalization command is not ready yet. Progress and
+executed evidence are tracked in [docs/progress.md](docs/progress.md) and
+[docs/validation.md](docs/validation.md).

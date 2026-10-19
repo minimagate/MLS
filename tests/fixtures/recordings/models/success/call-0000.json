@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "endpoint_kind": "generation",
+  "block_id": "block-1",
+  "attempt": 0,
+  "request": {
+    "context": { "attempt": 0, "block_id": "block-1" },
+    "endpoint": "/api/v1/chat/completions",
+    "max_tokens": 32,
+    "messages": [{ "content": "Return a tiny object.", "role": "user" }],
+    "model": "anthropic/claude-sonnet-5",
+    "provider": { "require_parameters": true },
+    "response_format": {
+      "name": "mls_statement_sir",
+      "strict": true,
+      "type": "json_schema"
+    },
+    "schema": {
+      "additionalProperties": false,
+      "properties": { "answer": { "type": "string" } },
+      "required": ["answer"],
+      "type": "object"
+    },
+    "schema_version": "test-v1",
+    "stage": "sir"
+  },
+  "request_hash": "00921c96838c6144a0cbbabb60d78b693eb5d29868f526b0fc3127cb6488b2b0",
+  "configured_model": "anthropic/claude-sonnet-5",
+  "resolved_model": "anthropic/claude-sonnet-5-20261001",
+  "usage": {
+    "input_tokens": 1,
+    "output_tokens": 2,
+    "total_tokens": 3,
+    "cost": null
+  },
+  "elapsed_ms": 7,
+  "response_status": 200,
+  "provider_response": {"synthetic": true},
+  "response": {
+    "finish_reason": "stop",
+    "metadata": {
+      "http_status": 200,
+      "configured_model": "anthropic/claude-sonnet-5",
+      "latency_ms": 7,
+      "provider": "synthetic",
+      "request_id": "id",
+      "resolved_model": "anthropic/claude-sonnet-5-20261001",
+      "usage": {
+        "cost": null,
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "total_tokens": 3
+      },
+      "provider_response": {"synthetic": true}
+    },
+    "output": { "answer": "recorded" }
+  },
+  "error": null,
+  "provenance": "synthetic"
+}

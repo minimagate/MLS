@@ -17,7 +17,7 @@ focused implementation, investigation, and independent review use separate agent
 ## M2 — Batch statements (active)
 - [x] Research actual provider model availability, Lean REPL and pinned Mathlib.
 - [x] Implement SIR schemas, validation, semantic hashing and diffs.
-- [ ] Implement configurable OpenRouter clients, typed decisions, logs, replay.
+- [x] Implement configurable OpenRouter clients, typed decisions, logs, replay.
 - [ ] Implement shadow projects, persistent Lean worker, error mapping and extraction.
 - [ ] Implement statement generation, bounded repair and structural hard checks.
 - [ ] Add first-year analysis/linear algebra evaluation corpus and metrics history.
@@ -36,7 +36,12 @@ and Lean investigation reports are in `docs/research/`. `implement_m2_models`
 owns the OpenRouter adapters and replay layer; `implement_m2_lean_runtime` owns
 the pinned local runtime and compiled syntax-aware extractor. Both use GPT-5.6
 Sol. The parent retains structure-check decisions, review and integration.
-The batch pipeline and M3–M5 have not started.
+The adapter passed independent review and an explicitly gated live smoke test
+against both configured models. `implement_m2_lean_worker` has implemented the
+transactional Rust worker and passed its first real Lean integration; independent
+Lean review is ongoing. `implement_m2_pipeline` owns the M2 batch engine and CLI.
+The parent prepared ten source-attributed evaluation cases; their runner and
+measured results are still pending. M3–M5 have not started.
 
 ## M3 — TeXmacs review (not started)
 - [ ] Implement batch protocol and thin Scheme plugin with persistent IDs.

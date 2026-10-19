@@ -1,0 +1,7 @@
+{
+  "generation_model": "anthropic/claude-sonnet-5",
+  "decision_model": "typesafe/jev-1.14",
+  "base_url": "https://openrouter.ai",
+  "request_timeout_seconds": 120,
+  "default_max_tokens": 4096
+}
