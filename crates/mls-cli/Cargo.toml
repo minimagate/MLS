@@ -11,11 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 mls-core = { path = "../mls-core" }
+mls-engine = { path = "../mls-engine" }
+mls-lean = { path = "../mls-lean" }
+mls-models = { path = "../mls-models" }
 mls-tm = { path = "../mls-tm" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-
-[dev-dependencies]
 tempfile = "3"
 
 [lints]
