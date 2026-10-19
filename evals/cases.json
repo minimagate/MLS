@@ -1,0 +1,310 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "bounded-on",
+      "block_id": "b94dd474-4475-5914-bf73-301208211377",
+      "area": "analysis",
+      "source_text": "For f : ℝ → ℝ and D ⊆ ℝ, boundedness on D means that some real M satisfies |f(x)| ≤ M for every x in D.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://www.jirka.org/ra/html/sec_absval.html",
+        "reference": "Jiří Lebl, Basic Analysis I, §1.3"
+      },
+      "expected_sir": {
+        "kind": "definition",
+        "label": "def:bounded-on",
+        "variables": [
+          {
+            "name": "f",
+            "type": "function ℝ → ℝ"
+          },
+          {
+            "name": "D",
+            "type": "set of real numbers"
+          }
+        ],
+        "hypotheses": [],
+        "conclusion": "∃ M ∈ ℝ, ∀ x ∈ D, |f x| ≤ M",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "triangle",
+      "block_id": "12b8a5c9-8ede-5e8c-9f31-70822cd8fb1d",
+      "area": "analysis",
+      "source_text": "Given real x and y, the magnitude of x+y does not exceed |x|+|y|.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://www.jirka.org/ra/html/sec_absval.html",
+        "reference": "Jiří Lebl, Basic Analysis I, §1.3"
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:triangle",
+        "variables": [
+          {
+            "name": "x",
+            "type": "real"
+          },
+          {
+            "name": "y",
+            "type": "real"
+          }
+        ],
+        "hypotheses": [],
+        "conclusion": "|x + y| ≤ |x| + |y|",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "maximum",
+      "block_id": "f3501b9a-354d-5e8e-a7b2-d4506acafaa7",
+      "area": "analysis",
+      "source_text": "Suppose a ≤ b are real and f : ℝ → ℝ is continuous on [a,b]. Some c in [a,b] maximizes f over that interval.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://www.jirka.org/ra/html/sec_minmaxint.html",
+        "reference": "Jiří Lebl, Basic Analysis I, §3.3"
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:maximum",
+        "variables": [
+          {
+            "name": "f",
+            "type": "function ℝ → ℝ"
+          },
+          {
+            "name": "a",
+            "type": "real"
+          },
+          {
+            "name": "b",
+            "type": "real"
+          }
+        ],
+        "hypotheses": [
+          "a ≤ b",
+          "f is continuous on [a, b]"
+        ],
+        "conclusion": "∃ c ∈ [a, b], ∀ x ∈ [a, b], f x ≤ f c",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "intermediate",
+      "block_id": "4a8a6714-0853-5ffa-9998-5fcec17e963b",
+      "area": "analysis",
+      "source_text": "Let real a ≤ b and y be given. If f : ℝ → ℝ is continuous on [a,b] and f(a) ≤ y ≤ f(b), then f(c)=y for some c in [a,b].",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://www.jirka.org/ra/html/sec_minmaxint.html",
+        "reference": "Jiří Lebl, Basic Analysis I, §3.3"
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:intermediate",
+        "variables": [
+          {
+            "name": "f",
+            "type": "function ℝ → ℝ"
+          },
+          {
+            "name": "a",
+            "type": "real"
+          },
+          {
+            "name": "b",
+            "type": "real"
+          },
+          {
+            "name": "y",
+            "type": "real"
+          }
+        ],
+        "hypotheses": [
+          "a ≤ b",
+          "f is continuous on [a, b]",
+          "f a ≤ y",
+          "y ≤ f b"
+        ],
+        "conclusion": "∃ c ∈ [a, b], f c = y",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "convergent-bounded",
+      "block_id": "ba0de2a8-6130-5a15-b61d-e05f8e8b2f8e",
+      "area": "analysis",
+      "source_text": "A real sequence u indexed by natural numbers starting at zero, converging to a real L, has a common absolute bound for all its terms.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://www.jirka.org/ra/html/sec_seqsandlims.html",
+        "reference": "Jiří Lebl, Basic Analysis I, §2.1"
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:convergent-bounded",
+        "variables": [
+          {
+            "name": "u",
+            "type": "sequence ℕ → ℝ"
+          },
+          {
+            "name": "L",
+            "type": "real"
+          }
+        ],
+        "hypotheses": [
+          "u converges to L as n tends to infinity"
+        ],
+        "conclusion": "∃ M ∈ ℝ, ∀ n ∈ ℕ, |u n| ≤ M",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "monotone-lower",
+      "block_id": "e6f78369-4be2-5016-b15e-54de1493a91c",
+      "area": "analysis",
+      "source_text": "If u : ℕ → ℝ is nondecreasing, then u(0) ≤ u(n) for every natural number n.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://www.jirka.org/ra/html/sec_seqsandlims.html",
+        "reference": "Jiří Lebl, Basic Analysis I, §2.1"
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:monotone-lower",
+        "variables": [
+          {
+            "name": "u",
+            "type": "sequence ℕ → ℝ"
+          }
+        ],
+        "hypotheses": [
+          "u is nondecreasing"
+        ],
+        "conclusion": "∀ n ∈ ℕ, u 0 ≤ u n",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "linear-zero",
+      "block_id": "ac157e1b-2b1e-54c7-b3e8-966f150068dd",
+      "area": "linear_algebra",
+      "source_text": "An ℝ-linear map T from ℝ² to ℝ² sends the zero vector to zero.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://jakobscholbach.github.io/lectures/linear-algebra/maps/",
+        "reference": "Jakob Scholbach, Linear Algebra, §4"
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:linear-zero",
+        "variables": [
+          {
+            "name": "T",
+            "type": "ℝ-linear map ℝ² → ℝ²"
+          }
+        ],
+        "hypotheses": [],
+        "conclusion": "T 0 = 0",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "kernel",
+      "block_id": "3ce094f7-a825-55af-978b-dec611ca1755",
+      "area": "linear_algebra",
+      "source_text": "For an ℝ-linear map T : ℝ² → ℝ², define its kernel to consist of the vectors v satisfying T(v)=0.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://jakobscholbach.github.io/lectures/linear-algebra/maps/",
+        "reference": "Jakob Scholbach, Linear Algebra, §4"
+      },
+      "expected_sir": {
+        "kind": "definition",
+        "label": "def:kernel",
+        "variables": [
+          {
+            "name": "T",
+            "type": "ℝ-linear map ℝ² → ℝ²"
+          }
+        ],
+        "hypotheses": [],
+        "conclusion": "{v ∈ ℝ² | T v = 0}",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "kernel-add",
+      "block_id": "3ee423c9-ecfd-5cd9-ba12-9ffa99b1eba3",
+      "area": "linear_algebra",
+      "source_text": "Let T : ℝ² → ℝ² be ℝ-linear. If T(u)=0 and T(v)=0, then T(u+v)=0.",
+      "provenance": {
+        "kind": "paraphrased_specialization",
+        "url": "https://jakobscholbach.github.io/lectures/linear-algebra/maps/",
+        "reference": "Jakob Scholbach, Linear Algebra, §4"
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:kernel-add",
+        "variables": [
+          {
+            "name": "T",
+            "type": "ℝ-linear map ℝ² → ℝ²"
+          },
+          {
+            "name": "u",
+            "type": "vector in ℝ²"
+          },
+          {
+            "name": "v",
+            "type": "vector in ℝ²"
+          }
+        ],
+        "hypotheses": [
+          "T u = 0",
+          "T v = 0"
+        ],
+        "conclusion": "T (u + v) = 0",
+        "uses": [],
+        "assumptions_made": []
+      }
+    },
+    {
+      "id": "square-nonnegative",
+      "block_id": "4e59b93f-757c-5b3d-840b-de80ff7e8df3",
+      "area": "analysis",
+      "source_text": "For each real number x, its square is nonnegative.",
+      "provenance": {
+        "kind": "original_elementary_example",
+        "url": null,
+        "reference": null
+      },
+      "expected_sir": {
+        "kind": "theorem",
+        "label": "thm:square-nonnegative",
+        "variables": [
+          {
+            "name": "x",
+            "type": "real"
+          }
+        ],
+        "hypotheses": [],
+        "conclusion": "0 ≤ x ^ 2",
+        "uses": [],
+        "assumptions_made": []
+      }
+    }
+  ]
+}

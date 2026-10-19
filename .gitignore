@@ -6,3 +6,5 @@
 .env.*
 *.tmp
 .DS_Store
+/evals/results/
+__pycache__/
