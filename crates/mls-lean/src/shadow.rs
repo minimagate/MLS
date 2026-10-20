@@ -75,14 +75,21 @@ pub enum ShadowError {
     InvalidSection(String),
 }
 
-/// Place a document's generated section under a sibling `.mls/Shadow` directory.
-pub fn shadow_path_for_document(document: &Path, section: &str) -> Result<PathBuf, ShadowError> {
+/// Place a section of one document under `.mls/Shadow/<module>/`, the document's own directory in
+/// the shared Shadow library. `module` is the document's Lean module component.
+pub fn shadow_path_for_document(
+    document: &Path,
+    module: &str,
+    section: &str,
+) -> Result<PathBuf, ShadowError> {
+    validate_section(module)?;
     validate_section(section)?;
     Ok(document
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".mls")
         .join("Shadow")
+        .join(module)
         .join(format!("{section}.lean")))
 }
 
@@ -163,11 +170,14 @@ pub fn generate_shadow(
 
 /// Generate section modules in dependency order, adding imports for earlier sections.
 ///
-/// Dependencies may cross sections. The returned `(name, file)` pairs are ordered so
-/// every imported generated module appears earlier.
+/// The sections are modules `Shadow.<module>.<section>`, where `module` names one document's
+/// directory in the shared Shadow library. Dependencies may cross sections. The returned
+/// `(name, file)` pairs are ordered so every imported generated module appears earlier.
 pub fn generate_shadow_project(
+    module: &str,
     sections: &[ShadowSection],
 ) -> Result<Vec<(String, ShadowFile)>, ShadowError> {
+    validate_section(module)?;
     let mut section_names = HashMap::new();
     let mut block_sections = HashMap::new();
     for (section_index, section) in sections.iter().enumerate() {
@@ -223,7 +233,7 @@ pub fn generate_shadow_project(
         let mut generated = generate_shadow(&section.name, &local)?;
         let imports: String = section_dependencies[section_index]
             .iter()
-            .map(|dependency| format!("import Shadow.{}\n", sections[*dependency].name))
+            .map(|dependency| format!("import Shadow.{module}.{}\n", sections[*dependency].name))
             .collect();
         if !imports.is_empty() {
             let insertion = "import Mathlib\n".len();
@@ -365,10 +375,32 @@ mod tests {
                 }],
             },
         ];
-        let generated = generate_shadow_project(&sections).unwrap();
+        let generated = generate_shadow_project("Doc_notes_00000000", &sections).unwrap();
         assert_eq!(generated[0].0, "Earlier");
         assert_eq!(generated[1].0, "Later");
-        assert!(generated[1].1.source.contains("import Shadow.Earlier"));
+        assert!(
+            generated[1]
+                .1
+                .source
+                .contains("import Shadow.Doc_notes_00000000.Earlier\n")
+        );
+    }
+
+    #[test]
+    fn invalid_module_names_are_refused() {
+        let sections = vec![ShadowSection {
+            name: "Section1".into(),
+            declarations: vec![],
+        }];
+        for module in ["doc", "Doc.Nested", "Doc-x", "Bad\nimport Evil", ""] {
+            assert!(
+                matches!(
+                    generate_shadow_project(module, &sections),
+                    Err(ShadowError::InvalidSection(_))
+                ),
+                "{module:?}"
+            );
+        }
     }
 
     #[test]
@@ -383,8 +415,16 @@ mod tests {
             Err(ShadowError::InvalidSection(_))
         ));
         assert!(matches!(
-            shadow_path_for_document(Path::new("notes.tm"), "a-b"),
+            shadow_path_for_document(Path::new("notes.tm"), "Doc_notes", "a-b"),
             Err(ShadowError::InvalidSection(_))
         ));
+        assert!(matches!(
+            shadow_path_for_document(Path::new("notes.tm"), "../escape", "Section1"),
+            Err(ShadowError::InvalidSection(_))
+        ));
+        assert_eq!(
+            shadow_path_for_document(Path::new("/d/notes.tm"), "Doc_notes", "Section1").unwrap(),
+            PathBuf::from("/d/.mls/Shadow/Doc_notes/Section1.lean")
+        );
     }
 }
