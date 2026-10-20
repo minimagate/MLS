@@ -16,7 +16,7 @@
         "role": "system"
       },
       {
-        "content": "SOURCE:\n<\\theorem>Truth holds.<label|thm:repair></theorem>\n\nDEPENDENCY SIRS:\n[]",
+        "content": "SOURCE:\n<theorem|Truth holds.<label|thm:repair>>\n\nDEPENDENCY SIRS:\n[]",
         "role": "user"
       }
     ],
@@ -102,7 +102,7 @@
     "schema_version": "mls-sir-v1",
     "stage": "sir"
   },
-  "request_hash": "c004d651ab48d560df025f78eefff3c85c09f032858dc524a3d07db18e2beb0f",
+  "request_hash": "a3a731a069ad2aed07f4319a2aa22c61d0238b973467bed1738ee8b22c0e4c2c",
   "configured_model": "anthropic/claude-sonnet-5",
   "resolved_model": "anthropic/claude-sonnet-5-20261001",
   "usage": {

@@ -16,7 +16,7 @@
         "role": "system"
       },
       {
-        "content": "SOURCE:\n<\\theorem>Truth still holds by <reference|thm:first>.<label|thm:second></theorem>\n\nDEPENDENCY SIRS:\n[{\"kind\":\"theorem\",\"label\":\"thm:first\",\"variables\":[],\"hypotheses\":[],\"conclusion\":\"truth\",\"uses\":[],\"assumptions_made\":[]}]",
+        "content": "SOURCE:\n<theorem|Truth still holds by <reference|thm:first>.<label|thm:second>>\n\nDEPENDENCY SIRS:\n[{\"kind\":\"theorem\",\"label\":\"thm:first\",\"variables\":[],\"hypotheses\":[],\"conclusion\":\"truth\",\"uses\":[],\"assumptions_made\":[]}]",
         "role": "user"
       }
     ],
@@ -102,7 +102,7 @@
     "schema_version": "mls-sir-v1",
     "stage": "sir"
   },
-  "request_hash": "e6fbc58d84dffee34eecec343ef309761b2e3b10081fe3987151767cf2414aab",
+  "request_hash": "5935c2e3d2ff6a02e8ba51d7d2bef8cda1a41f26327a4568ff4c9baa9aa8bae8",
   "configured_model": "anthropic/claude-sonnet-5",
   "resolved_model": "anthropic/claude-sonnet-5-20261001",
   "usage": {

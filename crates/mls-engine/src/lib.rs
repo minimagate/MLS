@@ -10,9 +10,16 @@ use mls_models::{
 };
 use mls_sir::{Sir, StatementKind};
 use mls_tm::{Analysis, analyze, parse};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
+
+pub mod review;
+
+pub use review::{
+    BlockView, CachedLean, REVIEW_SCHEMA_VERSION, ReviewEntry, ReviewError, ReviewStore,
+    ReviewView, VIEW_PROTOCOL, formal_block, lacks_persisted_ids, review_view,
+};
 
 const SIR_SCHEMA_VERSION: &str = "mls-sir-v1";
 const LEAN_SCHEMA_VERSION: &str = "mls-lean-statement-v1";
@@ -46,7 +53,7 @@ impl Default for PipelineConfig {
 }
 
 /// One deterministic comparison between the SIR and trusted Lean extraction.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckState {
     /// The supported structure agrees.
@@ -58,7 +65,7 @@ pub enum CheckState {
 }
 
 /// Whether a check concerns mechanically comparable structure or semantic content.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckScope {
     /// Counts, names, roles, binder info, outer heads, definition bodies and admission status.
@@ -69,7 +76,7 @@ pub enum CheckScope {
 }
 
 /// A reviewable structure-check item.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StructureCheck {
     /// Stable field identifier.
     pub field: String,
@@ -83,18 +90,53 @@ pub struct StructureCheck {
     pub scope: CheckScope,
 }
 
-/// M2 status vocabulary. It intentionally contains no confirmation or verification state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Formalization status of one block (spec section 7).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DraftStatus {
-    /// A valid SIR exists but has not been confirmed by a human.
+pub enum BlockStatus {
+    /// No usable SIR: generation failed, identities are invalid, a dependency is blocked, or a
+    /// rejected SIR was not replaced.
+    NotFormalized,
+    /// An unconfirmed SIR and an accepted Lean statement.
     SirDrafted,
-    /// Generation or elaboration exhausted its bounded attempts.
+    /// A human-confirmed SIR in effect, an accepted Lean statement, and every formal dependency
+    /// statement confirmed.
+    StatementConfirmed,
+    /// A SIR exists but no Lean statement was accepted.
     FormalizationError,
 }
 
-/// Per-block M2 result.
-#[derive(Clone, Debug, Serialize)]
+/// Number of blocks per status, for the document badge.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct StatusCounts {
+    /// Blocks with no usable SIR.
+    pub not_formalized: usize,
+    /// Blocks with an unconfirmed SIR and an accepted Lean statement.
+    pub sir_drafted: usize,
+    /// Blocks with a human-confirmed SIR and an accepted Lean statement.
+    pub statement_confirmed: usize,
+    /// Blocks with a SIR but no accepted Lean statement.
+    pub formalization_error: usize,
+}
+
+/// Summarize block statuses for the document badge.
+#[must_use]
+pub fn badge(report: &BatchReport) -> StatusCounts {
+    let mut counts = StatusCounts::default();
+    for block in &report.blocks {
+        let count = match block.status {
+            BlockStatus::NotFormalized => &mut counts.not_formalized,
+            BlockStatus::SirDrafted => &mut counts.sir_drafted,
+            BlockStatus::StatementConfirmed => &mut counts.statement_confirmed,
+            BlockStatus::FormalizationError => &mut counts.formalization_error,
+        };
+        *count += 1;
+    }
+    counts
+}
+
+/// Per-block result of one pipeline run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockReport {
     /// Stable source identity.
     pub block_id: BlockId,
@@ -104,10 +146,28 @@ pub struct BlockReport {
     pub source_start: usize,
     /// Exclusive byte offset of the original source block.
     pub source_end: usize,
-    /// M2 draft/error state.
-    pub status: DraftStatus,
-    /// Generated SIR, when valid.
+    /// Block text hash this report was produced for. Confirmation refuses a report whose text has
+    /// since changed.
+    pub text_hash: String,
+    /// Formalization status.
+    pub status: BlockStatus,
+    /// The SIR in effect, when one exists. It can be present for a block whose status is not
+    /// formalized, such as one with invalid identity metadata.
     pub sir: Option<Sir>,
+    /// Semantic hash of `sir`, when a SIR exists.
+    pub sir_hash: Option<String>,
+    /// Lean cache key of spec section 4, when a SIR passed its identity checks.
+    pub cache_key: Option<String>,
+    /// Where `sir` came from: `generated`, `confirmed` or `edited`.
+    pub sir_origin: Option<String>,
+    /// Where the accepted Lean statement came from: `generated` or `cache`.
+    pub lean_origin: Option<String>,
+    /// The block text changed but its SIR did not, so the confirmation still applies.
+    pub cosmetic_reconfirmation: bool,
+    /// How a regenerated SIR differs from the confirmed SIR that it replaces.
+    pub superseded_confirmation: Option<String>,
+    /// A reviewer rejected an earlier SIR for this block.
+    pub previously_rejected: bool,
     /// Candidate Lean declaration, when produced.
     pub lean_statement: Option<String>,
     /// Whether the candidate elaborated.
@@ -129,7 +189,7 @@ pub struct BlockReport {
 }
 
 /// A Lean error associated with the source block being formalized.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LeanDiagnostic {
     /// Stable source block identity.
     pub block_id: BlockId,
@@ -146,7 +206,7 @@ pub struct LeanDiagnostic {
 }
 
 /// Whole-document M2 report.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BatchReport {
     /// Parser/linker diagnostics from M1.
     pub diagnostics: Vec<mls_core::Diagnostic>,
@@ -157,7 +217,7 @@ pub struct BatchReport {
 }
 
 /// Aggregate model usage without treating missing provider values as zero.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UsageSummary {
     /// Attempted model calls, including failures.
     pub calls: u64,
@@ -300,6 +360,32 @@ pub fn run_batch_analyzed(
     checker: &mut impl StatementChecker,
     config: PipelineConfig,
 ) -> Result<BatchReport, PipelineError> {
+    run_batch_reviewed(
+        source,
+        analysis,
+        models,
+        checker,
+        config,
+        &ReviewStore::new(),
+    )
+}
+
+/// Run the pipeline with the human decisions in `review` applied.
+///
+/// A confirmed SIR whose block text is unchanged is used without a model call. Any other block
+/// gets a generated SIR, and a rejected SIR is given to the model as a note. Only a human decision
+/// can produce `statement_confirmed`, and only when every formal dependency is `statement_confirmed`
+/// too. A confirmed block with an unconfirmed dependency stays `sir_drafted`. Model prompts carry
+/// each block's canonical text from `analysis`, so `source` is not read; it is kept so callers
+/// that pass the document bytes keep compiling.
+pub fn run_batch_reviewed(
+    _source: &[u8],
+    analysis: &Analysis,
+    models: &mut impl ModelClient,
+    checker: &mut impl StatementChecker,
+    config: PipelineConfig,
+    review: &ReviewStore,
+) -> Result<BatchReport, PipelineError> {
     let order = formal_order(analysis)?;
     let by_id: HashMap<_, _> = analysis
         .blocks
@@ -334,6 +420,7 @@ pub fn run_batch_analyzed(
     }
     for id in order {
         let block = by_id[&id];
+        let mut report = empty_report(block);
         let failed_dependency = block.deps.iter().any(|dependency| {
             by_id
                 .get(dependency)
@@ -341,23 +428,12 @@ pub fn run_batch_analyzed(
                 && !accepted.contains_key(dependency)
         });
         if failed_dependency {
-            let mut report = empty_report(block);
             report
                 .errors
                 .push("a formal statement dependency was not accepted speculatively".into());
             reports.push(report);
             continue;
         }
-        // Non-UTF-8 bytes (for example Latin-1 Cork) are preserved by the parser. Such a block is
-        // reported as its own error and never sent to a model; the batch continues.
-        let Ok(text) = std::str::from_utf8(&source[block.source_start..block.source_end]) else {
-            let mut report = empty_report(block);
-            report
-                .errors
-                .push("block source is not valid UTF-8; it was not sent to a model".into());
-            reports.push(report);
-            continue;
-        };
         let dependencies: Vec<_> = block
             .deps
             .iter()
@@ -369,120 +445,155 @@ pub fn run_batch_analyzed(
             .filter_map(|dep| labels.get(dep))
             .cloned()
             .collect();
-        let mut report = empty_report(block);
-        let dependency_sirs = dependencies
+        let dependency_sirs: Vec<Sir> = dependencies
             .iter()
             .map(|dependency| dependency.sir.clone())
-            .collect::<Vec<_>>();
-        match generate_sir(
-            models,
+            .collect();
+        let Some(canonical) = analysis.canonical_text(block.id) else {
+            report.errors.push(
+                "canonicalization_failed: the block has no canonical text; it was not sent to a model"
+                    .into(),
+            );
+            reports.push(report);
+            continue;
+        };
+        let context = SirContext {
             block,
-            text,
-            &dependency_sirs,
-            config.sir_max_tokens,
-            &mut usage,
-        ) {
-            Err(error) => report.errors.push(error.to_string()),
-            Ok(sir) => {
-                report.status = DraftStatus::SirDrafted;
-                report.sir = Some(sir.clone());
-                let identity = validate_sir_identity(block, &sir, &expected_uses);
-                if !identity.is_empty() {
-                    report.errors.extend(identity);
-                    report.status = DraftStatus::FormalizationError;
-                    reports.push(report);
-                    continue;
-                }
-                let declaration_name = declaration_name(id);
-                let mut feedback = Vec::new();
-                for attempt in 0..config.max_attempts.max(1) {
-                    report.attempts += 1;
-                    report.lean_statement = None;
-                    report.elaborated = false;
-                    report.checks.clear();
-                    report.lean_diagnostics.clear();
-                    match generate_lean(
-                        models,
-                        LeanGeneration {
-                            block,
-                            sir: &sir,
-                            name: &declaration_name,
-                            attempt,
-                            feedback: &feedback,
-                            dependencies: &dependencies,
-                            max_tokens: config.lean_max_tokens,
-                        },
-                        &mut usage,
-                    ) {
-                        Err(error) => feedback = vec![error.to_string()],
-                        Ok(candidate) => {
-                            report.lean_statement = Some(candidate.clone());
-                            match checker.check(id, &declaration_name, &candidate) {
-                                Err(error) => {
-                                    report.lean_diagnostics = checker
-                                        .take_diagnostics()
-                                        .into_iter()
-                                        .map(|diagnostic| LeanDiagnostic {
-                                            block_id: id,
-                                            source_start: block.source_start,
-                                            source_end: block.source_end,
-                                            line: diagnostic.pos.map(|position| position.line),
-                                            column: diagnostic.pos.map(|position| position.column),
-                                            message: diagnostic.data,
-                                        })
-                                        .collect();
-                                    feedback = vec![format!("Lean: {error}")];
-                                    feedback.extend(admission_hint(&error));
+            canonical,
+            review,
+            dependencies: &dependency_sirs,
+            max_tokens: config.sir_max_tokens,
+        };
+        let Some((sir, origin)) = decide_sir(models, &context, &mut usage, &mut report) else {
+            reports.push(report);
+            continue;
+        };
+        report.sir_origin = Some(origin.as_str().into());
+        report.sir_hash = Some(sir.semantic_hash());
+        report.sir = Some(sir.clone());
+        let identity = validate_sir_identity(block, &sir, &expected_uses);
+        if !identity.is_empty() {
+            report.errors.extend(identity);
+            reports.push(report);
+            continue;
+        }
+        let cache_key = cache_key(&sir, block, &accepted);
+        report.cache_key = Some(cache_key.clone());
+        let declaration_name = declaration_name(id);
+        // A confirmed SIR whose cached declaration still matches its cache key skips generation.
+        // The cached check does not consume an attempt.
+        let cached = match (origin.is_human_confirmed(), review.cached_lean(id)) {
+            (true, Some(cached)) if cached.cache_key == cache_key => {
+                check_cached_declaration(checker, id, &declaration_name, &sir, cached)
+            }
+            _ => None,
+        };
+        if let Some((declaration, checks)) = cached {
+            report.lean_origin = Some("cache".into());
+            report.elaborated = true;
+            report.complete_structure = is_complete(&checks);
+            report.checks = checks;
+            report.accepted_speculatively = true;
+            report.lean_statement = Some(declaration.clone());
+            accepted.insert(
+                id,
+                AcceptedDependency {
+                    name: declaration_name,
+                    declaration,
+                    sir: sir.clone(),
+                },
+            );
+        } else {
+            let mut feedback = Vec::new();
+            for attempt in 0..config.max_attempts.max(1) {
+                report.attempts += 1;
+                report.lean_statement = None;
+                report.elaborated = false;
+                report.checks.clear();
+                report.lean_diagnostics.clear();
+                match generate_lean(
+                    models,
+                    LeanGeneration {
+                        block,
+                        sir: &sir,
+                        name: &declaration_name,
+                        attempt,
+                        feedback: &feedback,
+                        dependencies: &dependencies,
+                        max_tokens: config.lean_max_tokens,
+                    },
+                    &mut usage,
+                ) {
+                    Err(error) => feedback = vec![error.to_string()],
+                    Ok(candidate) => {
+                        report.lean_statement = Some(candidate.clone());
+                        match checker.check(id, &declaration_name, &candidate) {
+                            Err(error) => {
+                                report.lean_diagnostics = checker
+                                    .take_diagnostics()
+                                    .into_iter()
+                                    .map(|diagnostic| LeanDiagnostic {
+                                        block_id: id,
+                                        source_start: block.source_start,
+                                        source_end: block.source_end,
+                                        line: diagnostic.pos.map(|position| position.line),
+                                        column: diagnostic.pos.map(|position| position.column),
+                                        message: diagnostic.data,
+                                    })
+                                    .collect();
+                                feedback = vec![format!("Lean: {error}")];
+                                feedback.extend(admission_hint(&error));
+                            }
+                            Ok(extracted) => {
+                                report.elaborated = true;
+                                report.checks =
+                                    compare_structure(&sir, &declaration_name, &extracted);
+                                let hard_mismatch = report
+                                    .checks
+                                    .iter()
+                                    .any(|c| c.hard && c.state == CheckState::Mismatch);
+                                if let Err(error) = checker.finish(!hard_mismatch) {
+                                    feedback = vec![error];
+                                    continue;
                                 }
-                                Ok(extracted) => {
-                                    report.elaborated = true;
-                                    report.checks =
-                                        compare_structure(&sir, &declaration_name, &extracted);
-                                    let hard_mismatch = report
-                                        .checks
-                                        .iter()
-                                        .any(|c| c.hard && c.state == CheckState::Mismatch);
-                                    if let Err(error) = checker.finish(!hard_mismatch) {
-                                        feedback = vec![error];
-                                        continue;
-                                    }
-                                    if !hard_mismatch {
-                                        report.accepted_speculatively = true;
-                                        report.complete_structure =
-                                            !report.checks.iter().any(|c| {
-                                                c.scope == CheckScope::Structure
-                                                    && c.state == CheckState::Unchecked
-                                            });
-                                        accepted.insert(
-                                            id,
-                                            AcceptedDependency {
-                                                name: declaration_name.clone(),
-                                                declaration: candidate,
-                                                sir: sir.clone(),
-                                            },
-                                        );
-                                        feedback.clear();
-                                        break;
-                                    }
-                                    feedback = report
-                                        .checks
-                                        .iter()
-                                        .filter(|c| c.state == CheckState::Mismatch)
-                                        .map(|c| format!("{}: {}", c.field, c.detail))
-                                        .collect();
+                                if !hard_mismatch {
+                                    report.accepted_speculatively = true;
+                                    report.lean_origin = Some("generated".into());
+                                    report.complete_structure = is_complete(&report.checks);
+                                    accepted.insert(
+                                        id,
+                                        AcceptedDependency {
+                                            name: declaration_name.clone(),
+                                            declaration: candidate,
+                                            sir: sir.clone(),
+                                        },
+                                    );
+                                    feedback.clear();
+                                    break;
                                 }
+                                feedback = report
+                                    .checks
+                                    .iter()
+                                    .filter(|c| c.state == CheckState::Mismatch)
+                                    .map(|c| format!("{}: {}", c.field, c.detail))
+                                    .collect();
                             }
                         }
                     }
                 }
-                report.errors.extend(feedback);
-                if !report.accepted_speculatively {
-                    report.status = DraftStatus::FormalizationError;
-                }
             }
+            report.errors.extend(feedback);
         }
+        report.status = match (report.accepted_speculatively, origin.is_human_confirmed()) {
+            (true, true) => BlockStatus::StatementConfirmed,
+            (true, false) => BlockStatus::SirDrafted,
+            (false, _) => BlockStatus::FormalizationError,
+        };
         reports.push(report);
     }
+    // A confirmed block is statement_confirmed only once its formal dependencies are too. Reports
+    // are in dependency order, so each block sees the final status of its dependencies.
+    review::settle_dependency_confirmations(&mut reports, &by_id);
     Ok(BatchReport {
         diagnostics: analysis.diagnostics.clone(),
         blocks: reports,
@@ -517,8 +628,16 @@ fn empty_report(block: &Block) -> BlockReport {
         label: block.label.clone(),
         source_start: block.source_start,
         source_end: block.source_end,
-        status: DraftStatus::FormalizationError,
+        text_hash: block.text_hash.clone(),
+        status: BlockStatus::NotFormalized,
         sir: None,
+        sir_hash: None,
+        cache_key: None,
+        sir_origin: None,
+        lean_origin: None,
+        cosmetic_reconfirmation: false,
+        superseded_confirmation: None,
+        previously_rejected: false,
         lean_statement: None,
         elaborated: false,
         complete_structure: false,
@@ -586,9 +705,20 @@ fn generate_sir(
     block: &Block,
     text: &str,
     dependencies: &[Sir],
+    rejected: Option<&Sir>,
     max_tokens: u32,
     usage: &mut UsageSummary,
 ) -> Result<Sir, ModelError> {
+    let mut user_content = format!(
+        "SOURCE:\n{text}\n\nDEPENDENCY SIRS:\n{}",
+        serde_json::to_string(dependencies).expect("SIR serialization cannot fail")
+    );
+    if let Some(rejected) = rejected {
+        user_content.push_str(&format!(
+            "\n\nREVIEW NOTE: a reviewer rejected the previous SIR for this source. Return a corrected SIR; do not repeat the rejected one.\nREJECTED SIR:\n{}",
+            serde_json::to_string(rejected).expect("SIR serialization cannot fail")
+        ));
+    }
     let request = GenerationRequest {
         context: CallContext {
             block_id: block.id.to_string(),
@@ -602,10 +732,7 @@ fn generate_sir(
             },
             ChatMessage {
                 role: "user".into(),
-                content: format!(
-                    "SOURCE:\n{text}\n\nDEPENDENCY SIRS:\n{}",
-                    serde_json::to_string(dependencies).expect("SIR serialization cannot fail")
-                ),
+                content: user_content,
             },
         ],
         schema_version: SIR_SCHEMA_VERSION.into(),
@@ -615,6 +742,171 @@ fn generate_sir(
     let reply = generate_accounted(models, &request, usage)?;
     let sir = serde_json::from_value(reply.output).map_err(ModelError::Json)?;
     Ok(sir)
+}
+
+/// Where the SIR in effect for a block came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SirOrigin {
+    Generated,
+    Confirmed,
+    Edited,
+}
+
+impl SirOrigin {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::Confirmed => "confirmed",
+            Self::Edited => "edited",
+        }
+    }
+
+    const fn is_human_confirmed(self) -> bool {
+        !matches!(self, Self::Generated)
+    }
+}
+
+/// Inputs for choosing the SIR of one block.
+struct SirContext<'a> {
+    block: &'a Block,
+    /// Layout-independent block text sent to the model; see `Analysis::canonical_text`.
+    canonical: &'a [u8],
+    review: &'a ReviewStore,
+    dependencies: &'a [Sir],
+    max_tokens: u32,
+}
+
+/// Choose the SIR in effect for a block. A confirmed or edited SIR whose block text is unchanged
+/// is used without a model call. Otherwise a SIR is generated, and a rejected SIR is given to the
+/// model as a note. Returns `None` when the block has no usable SIR; the reason is in the report.
+fn decide_sir(
+    models: &mut impl ModelClient,
+    context: &SirContext<'_>,
+    usage: &mut UsageSummary,
+    report: &mut BlockReport,
+) -> Option<(Sir, SirOrigin)> {
+    let block = context.block;
+    let entry = context.review.entry(block.id);
+    report.previously_rejected = matches!(entry, Some(ReviewEntry::Rejected { .. }));
+    if let Some(ReviewEntry::Confirmed {
+        sir,
+        text_hash,
+        edited,
+        ..
+    }) = entry
+        && *text_hash == block.text_hash
+    {
+        let origin = if *edited {
+            SirOrigin::Edited
+        } else {
+            SirOrigin::Confirmed
+        };
+        return Some((sir.clone(), origin));
+    }
+    let Ok(text) = std::str::from_utf8(context.canonical) else {
+        report
+            .errors
+            .push("block source is not valid UTF-8; it was not sent to a model".into());
+        return None;
+    };
+    let rejected = match entry {
+        Some(ReviewEntry::Rejected { sir, .. }) => Some(sir),
+        _ => None,
+    };
+    let generated = match generate_sir(
+        models,
+        block,
+        text,
+        context.dependencies,
+        rejected,
+        context.max_tokens,
+        usage,
+    ) {
+        Ok(sir) => sir,
+        Err(error) => {
+            report.errors.push(error.to_string());
+            return None;
+        }
+    };
+    if let Some(previous) = rejected
+        && previous.semantic_hash() == generated.semantic_hash()
+    {
+        report
+            .errors
+            .push("the regenerated SIR equals the rejected SIR".into());
+        return None;
+    }
+    if let Some(ReviewEntry::Confirmed {
+        sir: confirmed,
+        sir_hash,
+        ..
+    }) = entry
+    {
+        if generated.semantic_hash() == *sir_hash {
+            report.cosmetic_reconfirmation = true;
+            return Some((confirmed.clone(), SirOrigin::Confirmed));
+        }
+        let changed: Vec<_> = confirmed
+            .diff(&generated)
+            .changes
+            .iter()
+            .map(|change| change.field)
+            .collect();
+        report.superseded_confirmation = Some(format!("changed fields: {}", changed.join(", ")));
+    }
+    Some((generated, SirOrigin::Generated))
+}
+
+/// Cache key of spec section 4: this block's SIR hash, then the id and SIR hash of each formal
+/// dependency in dependency order, joined by newlines and hashed with SHA-256.
+fn cache_key(sir: &Sir, block: &Block, accepted: &HashMap<BlockId, AcceptedDependency>) -> String {
+    let dependencies: Vec<(BlockId, String)> = block
+        .deps
+        .iter()
+        .filter_map(|dependency| {
+            accepted
+                .get(dependency)
+                .map(|entry| (*dependency, entry.sir.semantic_hash()))
+        })
+        .collect();
+    cache_key_from_hashes(&sir.semantic_hash(), &dependencies)
+}
+
+/// The section 4 cache key from a block's SIR hash and the `(id, SIR hash)` pairs of its formal
+/// dependencies, in `block.deps` order. The pipeline and the review view both compute keys here.
+pub(crate) fn cache_key_from_hashes(sir_hash: &str, dependencies: &[(BlockId, String)]) -> String {
+    let mut lines = vec![sir_hash.to_owned()];
+    lines.extend(
+        dependencies
+            .iter()
+            .map(|(dependency, hash)| format!("{dependency} {hash}")),
+    );
+    mls_core::source_hash(lines.join("\n").as_bytes())
+}
+
+/// Check a cached declaration against the current checker. It is accepted only when it elaborates
+/// with no hard mismatch. A `None` result leaves the checker with no pending candidate.
+fn check_cached_declaration(
+    checker: &mut impl StatementChecker,
+    id: BlockId,
+    name: &str,
+    sir: &Sir,
+    cached: &CachedLean,
+) -> Option<(String, Vec<StructureCheck>)> {
+    let extracted = checker.check(id, name, &cached.declaration).ok()?;
+    let checks = compare_structure(sir, name, &extracted);
+    let hard_mismatch = checks
+        .iter()
+        .any(|check| check.hard && check.state == CheckState::Mismatch);
+    checker.finish(!hard_mismatch).ok()?;
+    (!hard_mismatch).then(|| (cached.declaration.clone(), checks))
+}
+
+/// Whether no structure-scoped check is unchecked.
+fn is_complete(checks: &[StructureCheck]) -> bool {
+    !checks
+        .iter()
+        .any(|check| check.scope == CheckScope::Structure && check.state == CheckState::Unchecked)
 }
 
 struct LeanGeneration<'a> {
@@ -759,7 +1051,7 @@ fn generate_accounted(
     }
 }
 
-fn validate_sir_identity(block: &Block, sir: &Sir, uses: &[String]) -> Vec<String> {
+pub(crate) fn validate_sir_identity(block: &Block, sir: &Sir, uses: &[String]) -> Vec<String> {
     let mut errors = Vec::new();
     if source_kind(block.kind) != Some(sir.kind()) {
         errors.push("SIR kind differs from tagged source kind".into());
@@ -1511,7 +1803,7 @@ mod tests {
         };
         let mut model = OneReply(Some(Ok(reply)));
         let mut usage = UsageSummary::default();
-        assert!(generate_sir(&mut model, &test_block(), "x", &[], 10, &mut usage).is_err());
+        assert!(generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage).is_err());
         assert_eq!(usage.calls, 1);
         assert_eq!(usage.input_tokens, 7);
         assert_eq!(usage.unknown_output_token_calls, 1);
@@ -1536,7 +1828,7 @@ mod tests {
         };
         let mut model = OneReply(Some(Err(error)));
         let mut usage = UsageSummary::default();
-        assert!(generate_sir(&mut model, &test_block(), "x", &[], 10, &mut usage).is_err());
+        assert!(generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage).is_err());
         assert_eq!(usage.calls, 1);
         assert_eq!(usage.output_tokens, 9);
         assert_eq!(usage.unknown_input_token_calls, 1);
@@ -2098,7 +2390,7 @@ mod tests {
     fn replay_mismatch_is_not_counted_as_a_provider_call() {
         let mut model = OneReply(Some(Err(ModelError::ReplayMismatch)));
         let mut usage = UsageSummary::default();
-        let error = generate_sir(&mut model, &test_block(), "x", &[], 10, &mut usage);
+        let error = generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage);
         assert!(matches!(error, Err(ModelError::ReplayMismatch)));
         assert_eq!(usage.calls, 0);
     }
@@ -2107,11 +2399,65 @@ mod tests {
     fn recording_stopped_is_not_counted_as_a_provider_call() {
         let mut model = OneReply(Some(Err(ModelError::RecordingStopped)));
         let mut usage = UsageSummary::default();
-        let error = generate_sir(&mut model, &test_block(), "x", &[], 10, &mut usage);
+        let error = generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage);
         assert!(matches!(error, Err(ModelError::RecordingStopped)));
         assert_eq!(usage.calls, 0);
         assert_eq!(usage.unknown_output_token_calls, 0);
         assert_eq!(usage.unknown_cost_calls, 0);
+    }
+
+    /// Fails the test if a model is asked anything.
+    struct NoModel;
+
+    impl ModelClient for NoModel {
+        fn generate(&mut self, _: &GenerationRequest) -> Result<GenerationReply, ModelError> {
+            panic!("a block without canonical text reached a model");
+        }
+        fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
+            panic!("a block without canonical text reached a model");
+        }
+    }
+
+    /// Fails the test if the statement checker is asked anything.
+    struct NoChecker;
+
+    impl StatementChecker for NoChecker {
+        fn check(&mut self, _: BlockId, _: &str, _: &str) -> Result<ExtractedDeclaration, String> {
+            panic!("a block without canonical text reached the checker");
+        }
+        fn finish(&mut self, _: bool) -> Result<(), String> {
+            panic!("a block without canonical text reached the checker");
+        }
+    }
+
+    #[test]
+    fn block_without_canonical_text_is_not_formalized_and_not_sent() {
+        let source = "<\\body><\\theorem>x<with|mls-id|0f8fad5b-d9cb-469f-a165-70867728950e|></theorem></body>";
+        let analysis = analyze(&parse(source.as_bytes()).unwrap());
+        assert!(
+            analysis
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "canonicalization_failed")
+        );
+        let report = run_batch_analyzed(
+            source.as_bytes(),
+            &analysis,
+            &mut NoModel,
+            &mut NoChecker,
+            PipelineConfig::default(),
+        )
+        .unwrap();
+        let block = &report.blocks[0];
+        assert_eq!(block.status, BlockStatus::NotFormalized);
+        assert!(
+            block
+                .errors
+                .iter()
+                .any(|error| error.starts_with("canonicalization_failed")),
+            "{:?}",
+            block.errors
+        );
     }
 
     #[test]
@@ -2131,6 +2477,7 @@ mod tests {
             blocks: vec![block(second, vec![first]), block(first, vec![])],
             diagnostics: vec![],
             insertions: vec![],
+            canonical: HashMap::new(),
         };
         assert_eq!(formal_order(&analysis).unwrap(), vec![first, second]);
     }

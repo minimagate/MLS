@@ -16,7 +16,7 @@
         "role": "system"
       },
       {
-        "content": "SOURCE:\n<\\theorem>The identity function maps zero to zero by <reference|def:identity>.<label|thm:identity-zero></theorem>\n\nDEPENDENCY SIRS:\n[{\"kind\":\"definition\",\"label\":\"def:identity\",\"variables\":[{\"name\":\"x\",\"type\":\"natural number\"}],\"hypotheses\":[],\"conclusion\":\"x\",\"uses\":[],\"assumptions_made\":[]}]",
+        "content": "SOURCE:\n<theorem|The identity function maps zero to zero by <reference|def:identity>.<label|thm:identity-zero>>\n\nDEPENDENCY SIRS:\n[{\"kind\":\"definition\",\"label\":\"def:identity\",\"variables\":[{\"name\":\"x\",\"type\":\"natural number\"}],\"hypotheses\":[],\"conclusion\":\"x\",\"uses\":[],\"assumptions_made\":[]}]",
         "role": "user"
       }
     ],
@@ -102,7 +102,7 @@
     "schema_version": "mls-sir-v1",
     "stage": "sir"
   },
-  "request_hash": "4e7537d594d2b32351ebaf974c48d1cef61086efa36d188e5595a841f0028cc9",
+  "request_hash": "bcbc0fb110e71bb9cfacbc4da0b317c5bb6376e84721da140fa0b7a7c6958744",
   "configured_model": "anthropic/claude-sonnet-5",
   "resolved_model": "anthropic/claude-sonnet-5-20261001",
   "usage": {

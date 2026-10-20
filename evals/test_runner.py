@@ -46,7 +46,7 @@ def realistic_inputs():
              "sir": expected_c, "elaborated": True, "complete_structure": False,
              "accepted_speculatively": False, "checks": [{"hard": True, "state": "mismatch"}],
              "errors": ["conclusion mismatch"]},
-            {"block_id": "d-id", "label": "thm:d", "status": "formalization_error",
+            {"block_id": "d-id", "label": "thm:d", "status": "not_formalized",
              "sir": None, "elaborated": False, "complete_structure": False,
              "accepted_speculatively": False, "checks": [],
              "errors": [runner.BLOCKED_DEPENDENCY]},
@@ -181,6 +181,10 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(result["structure"]["partial"]["count"], 1)
         self.assertEqual(result["structure"]["hard_mismatch"]["count"], 1)
         self.assertEqual(result["failures"]["blocked_dependency_count"], 1)
+        self.assertEqual(
+            sorted(case["status"] for case in result["failures"]["cases"]),
+            ["formalization_error", "not_formalized"],
+        )
         self.assertEqual(result["accepted_unconfirmed"]["count"], 2)
         self.assertEqual(result["usage"]["known_cost_calls"], 3)
         self.assertEqual(result["usage"]["unknown_cost_count"], 2)

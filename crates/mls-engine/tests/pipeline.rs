@@ -1,28 +1,20 @@
 //! Recorded end-to-end acceptance tests for the M2 batch pipeline.
 
+mod common;
+
+use common::*;
 use mls_core::BlockId;
 use mls_engine::{
-    CheckScope, CheckState, DraftStatus, LeanStatementChecker, PipelineConfig, StatementChecker,
-    run_batch,
+    BlockStatus, CheckScope, CheckState, LeanStatementChecker, StatementChecker, run_batch,
 };
-use mls_lean::{
-    Binder, ExtractedDeclaration, LeanWorker, Position, ReplConfig, ReplDiagnostic, Severity,
-};
+use mls_lean::{Binder, ExtractedDeclaration, LeanWorker, Position, ReplConfig};
 use mls_models::{
-    CallMetadata, DecisionReply, DecisionRequest, GenerationReply, GenerationRequest, ModelClient,
-    ModelError, RecordingClient, ReplayClient, Usage,
+    DecisionReply, DecisionRequest, GenerationReply, GenerationRequest, ModelClient, ModelError,
+    RecordingClient, ReplayClient,
 };
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-const GENERATION_MODEL: &str = "anthropic/claude-sonnet-5";
-const DECISION_MODEL: &str = "typesafe/jev-1.14";
-
-fn fixture_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
-}
 
 fn source(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -31,83 +23,6 @@ fn source(name: &str) -> Vec<u8> {
             .join(format!("{name}.tm")),
     )
     .unwrap()
-}
-
-fn config() -> PipelineConfig {
-    PipelineConfig {
-        max_attempts: 2,
-        sir_max_tokens: 4096,
-        lean_max_tokens: 4096,
-    }
-}
-
-#[derive(Clone)]
-enum CheckStep {
-    Error(&'static str),
-    /// A failed check that also reports one structured Lean diagnostic at the given position.
-    ErrorWithDiagnostic(&'static str, Position),
-    Extracted(ExtractedDeclaration),
-}
-
-struct ScriptedChecker {
-    steps: VecDeque<CheckStep>,
-    checked_sources: Vec<String>,
-    finishes: Vec<bool>,
-    diagnostics: Vec<ReplDiagnostic>,
-}
-
-impl ScriptedChecker {
-    fn new(steps: impl IntoIterator<Item = CheckStep>) -> Self {
-        Self {
-            steps: steps.into_iter().collect(),
-            checked_sources: Vec::new(),
-            finishes: Vec::new(),
-            diagnostics: Vec::new(),
-        }
-    }
-}
-
-impl StatementChecker for ScriptedChecker {
-    fn check(&mut self, _: BlockId, _: &str, source: &str) -> Result<ExtractedDeclaration, String> {
-        self.checked_sources.push(source.to_owned());
-        self.diagnostics.clear();
-        match self.steps.pop_front().expect("unexpected checker call") {
-            CheckStep::Error(error) => Err(error.into()),
-            CheckStep::ErrorWithDiagnostic(error, position) => {
-                self.diagnostics = vec![ReplDiagnostic {
-                    severity: Severity::Error,
-                    pos: Some(position),
-                    end_pos: None,
-                    data: error.into(),
-                }];
-                Err(error.into())
-            }
-            CheckStep::Extracted(value) => Ok(value),
-        }
-    }
-
-    fn finish(&mut self, accept: bool) -> Result<(), String> {
-        self.finishes.push(accept);
-        Ok(())
-    }
-
-    fn take_diagnostics(&mut self) -> Vec<ReplDiagnostic> {
-        std::mem::take(&mut self.diagnostics)
-    }
-}
-
-fn extracted(id: u8, goal_outer_head: &str) -> ExtractedDeclaration {
-    ExtractedDeclaration {
-        declaration: format!("mls_00000000_0000_4000_8000_{id:012}"),
-        kind: "theorem".into(),
-        binders: Vec::new(),
-        goal: "True".into(),
-        goal_outer_head: goal_outer_head.into(),
-        axioms: vec!["sorryAx".into()],
-        has_sorry: true,
-        body: None,
-        body_outer_head: None,
-    }
 }
 
 fn replay(name: &str) -> ReplayClient {
@@ -130,7 +45,7 @@ fn replay_success_has_deterministic_draft_report() {
 
     assert_eq!(report.blocks.len(), 2);
     assert!(report.blocks.iter().all(|block| {
-        block.status == DraftStatus::SirDrafted
+        block.status == BlockStatus::SirDrafted
             && block.elaborated
             && block.accepted_speculatively
             && !block.complete_structure
@@ -160,7 +75,7 @@ fn replay_repair_uses_feedback_and_keeps_the_draft_unconfirmed() {
     let report = run_batch(&source("repair"), &mut models, &mut checker, config()).unwrap();
     let block = &report.blocks[0];
 
-    assert_eq!(block.status, DraftStatus::SirDrafted);
+    assert_eq!(block.status, BlockStatus::SirDrafted);
     assert!(block.accepted_speculatively);
     assert_eq!(block.attempts, 2);
     assert_eq!(checker.finishes, [true]);
@@ -211,7 +126,7 @@ fn hard_mismatch_exhausts_attempts_and_blocks_dependent_without_model_calls() {
     let report = run_batch(&source("blocked"), &mut models, &mut checker, config()).unwrap();
 
     let failed = &report.blocks[0];
-    assert_eq!(failed.status, DraftStatus::FormalizationError);
+    assert_eq!(failed.status, BlockStatus::FormalizationError);
     assert!(!failed.accepted_speculatively);
     assert_eq!(failed.attempts, 2);
     assert_eq!(checker.finishes, [false, false]);
@@ -223,7 +138,7 @@ fn hard_mismatch_exhausts_attempts_and_blocks_dependent_without_model_calls() {
     );
 
     let dependent = &report.blocks[1];
-    assert_eq!(dependent.status, DraftStatus::FormalizationError);
+    assert_eq!(dependent.status, BlockStatus::NotFormalized);
     assert_eq!(dependent.attempts, 0);
     assert!(dependent.sir.is_none());
     assert_eq!(
@@ -239,7 +154,7 @@ fn recorded_hard_errors_are_bounded_by_max_attempts() {
     let mut checker = ScriptedChecker::new([]);
     let report = run_batch(&source("exhaustion"), &mut models, &mut checker, config()).unwrap();
     let block = &report.blocks[0];
-    assert_eq!(block.status, DraftStatus::FormalizationError);
+    assert_eq!(block.status, BlockStatus::FormalizationError);
     assert_eq!(block.attempts, 2);
     assert!(!block.elaborated);
     assert!(!block.accepted_speculatively);
@@ -258,7 +173,7 @@ fn replay_rejects_even_a_small_prompt_contract_change() {
     let mut changed = config();
     changed.sir_max_tokens = 4095;
     let report = run_batch(&source("success"), &mut models, &mut checker, changed).unwrap();
-    assert_eq!(report.blocks[0].status, DraftStatus::FormalizationError);
+    assert_eq!(report.blocks[0].status, BlockStatus::NotFormalized);
     assert_eq!(
         report.blocks[0].errors,
         ["no exact replay match for request"]
@@ -385,7 +300,7 @@ fn elaboration_failure_after_mismatch_leaves_no_stale_evidence() {
 
     assert_eq!(report.blocks.len(), 1);
     let block = &report.blocks[0];
-    assert_eq!(block.status, DraftStatus::FormalizationError);
+    assert_eq!(block.status, BlockStatus::FormalizationError);
     assert_eq!(block.attempts, 2);
     assert!(!block.elaborated);
     assert!(!block.accepted_speculatively);
@@ -452,7 +367,7 @@ fn diagnostics_from_a_failed_attempt_do_not_survive_a_later_hard_mismatch() {
     let report = run_batch(&source("repair"), &mut models, &mut checker, config()).unwrap();
 
     let block = &report.blocks[0];
-    assert_eq!(block.status, DraftStatus::FormalizationError);
+    assert_eq!(block.status, BlockStatus::FormalizationError);
     assert_eq!(block.attempts, 2);
     assert!(block.elaborated);
     assert!(!block.accepted_speculatively);
@@ -562,10 +477,10 @@ fn non_utf8_block_is_its_own_error_and_does_not_abort_the_batch() {
 
     assert_eq!(report.blocks.len(), 2);
     let first = &report.blocks[0];
-    assert_eq!(first.status, DraftStatus::SirDrafted);
+    assert_eq!(first.status, BlockStatus::SirDrafted);
     assert!(first.accepted_speculatively);
     let second = &report.blocks[1];
-    assert_eq!(second.status, DraftStatus::FormalizationError);
+    assert_eq!(second.status, BlockStatus::NotFormalized);
     assert_eq!(second.attempts, 0);
     assert!(second.sir.is_none());
     assert!(second.lean_statement.is_none());
@@ -864,72 +779,5 @@ impl ModelClient for QueueClient {
 
     fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
         unreachable!("M2 does not make decision calls")
-    }
-}
-
-struct CapturingClient {
-    replies: VecDeque<Result<GenerationReply, ModelError>>,
-    requests: Vec<GenerationRequest>,
-}
-
-impl ModelClient for CapturingClient {
-    fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
-        self.requests.push(request.clone());
-        self.replies
-            .pop_front()
-            .expect("missing synthetic response")
-    }
-
-    fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
-        unreachable!("M2 does not make decision calls")
-    }
-}
-
-fn sir(id: u8, kind: &str, label: &str, uses: Vec<&str>, conclusion: &str) -> GenerationReply {
-    reply(
-        id,
-        json!({
-            "kind": kind,
-            "label": label,
-            "variables": [],
-            "hypotheses": [],
-            "conclusion": conclusion,
-            "uses": uses,
-            "assumptions_made": []
-        }),
-    )
-}
-
-fn lean(statement: &str) -> GenerationReply {
-    reply(
-        0,
-        json!({
-            "lean_statement": statement,
-            "lean_proof": null,
-            "mathlib_names_used": [],
-            "notes": []
-        }),
-    )
-}
-
-fn reply(seed: u8, output: Value) -> GenerationReply {
-    GenerationReply {
-        output,
-        metadata: CallMetadata {
-            http_status: 200,
-            configured_model: GENERATION_MODEL.into(),
-            resolved_model: "anthropic/claude-sonnet-5-20261001".into(),
-            request_id: Some(format!("synthetic-{seed}")),
-            provider: Some("synthetic".into()),
-            latency_ms: 0,
-            usage: Usage {
-                input_tokens: Some(10),
-                output_tokens: Some(5),
-                total_tokens: Some(15),
-                cost: Some(0.01),
-            },
-            provider_response: json!({"synthetic": true}),
-        },
-        finish_reason: "stop".into(),
     }
 }

@@ -16,7 +16,7 @@
         "role": "system"
       },
       {
-        "content": "SOURCE:\n<\\definition>The identity function on natural numbers maps x to x.<label|def:identity></definition>\n\nDEPENDENCY SIRS:\n[]",
+        "content": "SOURCE:\n<definition|The identity function on natural numbers maps x to x.<label|def:identity>>\n\nDEPENDENCY SIRS:\n[]",
         "role": "user"
       }
     ],
@@ -102,7 +102,7 @@
     "schema_version": "mls-sir-v1",
     "stage": "sir"
   },
-  "request_hash": "b981cbdddc2b5122e50c3ff75ff729e7649b4e3ad0ff4de0c7573fe47f556086",
+  "request_hash": "5800a7c7a244a3c1f4d2717114ad70bb86a4d973680518c32427731b344ead56",
   "configured_model": "anthropic/claude-sonnet-5",
   "resolved_model": "anthropic/claude-sonnet-5-20261001",
   "usage": {

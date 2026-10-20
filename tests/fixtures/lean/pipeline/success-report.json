@@ -4,8 +4,9 @@
     {
       "block_id": "00000000-0000-4000-8000-000000000001",
       "label": "thm:first",
-      "source_start": 95,
-      "source_end": 144,
+      "source_start": 96,
+      "source_end": 145,
+      "text_hash": "3f7873e1ad23add0161de4fb89cf80d528e22a0be56ab79910087b251047c5ec",
       "status": "sir_drafted",
       "sir": {
         "kind": "theorem",
@@ -16,6 +17,13 @@
         "uses": [],
         "assumptions_made": []
       },
+      "sir_hash": "c14cab546d83add536cce031d79c3077c9baa5d535651215cb3b6dc66eb44422",
+      "cache_key": "c748d8e526bc2541abd06d0ff3337029bc2eed659ab85adb3e899c41b3db55a3",
+      "sir_origin": "generated",
+      "lean_origin": "generated",
+      "cosmetic_reconfirmation": false,
+      "superseded_confirmation": null,
+      "previously_rejected": false,
       "lean_statement": "theorem mls_00000000_0000_4000_8000_000000000001 : True := by sorry",
       "elaborated": true,
       "complete_structure": false,
@@ -71,8 +79,9 @@
     {
       "block_id": "00000000-0000-4000-8000-000000000002",
       "label": "thm:second",
-      "source_start": 224,
-      "source_end": 305,
+      "source_start": 225,
+      "source_end": 306,
+      "text_hash": "976d2a614963a52bdf07662ce424d2708850f55ace9a4871b88e5c927f922f43",
       "status": "sir_drafted",
       "sir": {
         "kind": "theorem",
@@ -85,6 +94,13 @@
         ],
         "assumptions_made": []
       },
+      "sir_hash": "d8e4662ef9b1228500c6a34106a5662daedf4456cf1afdf55868762176708959",
+      "cache_key": "835fa14222ca8c77fa488a8888da5b97066292cd12faeaf12e93aa43007c23ec",
+      "sir_origin": "generated",
+      "lean_origin": "generated",
+      "cosmetic_reconfirmation": false,
+      "superseded_confirmation": null,
+      "previously_rejected": false,
       "lean_statement": "theorem mls_00000000_0000_4000_8000_000000000002 : True := by sorry",
       "elaborated": true,
       "complete_structure": false,
