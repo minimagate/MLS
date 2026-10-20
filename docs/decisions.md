@@ -273,3 +273,54 @@ no model call). The plugin refuses its first command when the file on disk
 differs from the buffer, so you save or revert in TeXmacs first. Why: MLS must
 read every block exactly as TeXmacs does, and must never write over content it
 did not create.
+
+## 2026-10-20 — M4 caches for unconfirmed drafts
+Context: live mode re-analyzes on every edit, and M3 cached Lean statements
+only for confirmed SIRs, so unconfirmed drafts would be regenerated at model
+cost whenever anything changed. Choice: an SIR cache keyed by the block's
+canonical text hash, the in-effect dependency SIR hashes, the generation model
+and the SIR schema version; and a Lean cache keyed by the §4 key for any SIR.
+Every cache hit is re-checked by Lean before acceptance, and caching never
+confers confirmation: `statement_confirmed` still follows the M3 review rules.
+Why: principle 4 (nothing is re-formalized unless its meaning or a
+dependency's meaning changed) applies to drafts as much as to confirmed SIRs.
+
+## 2026-10-20 — Premise retrieval uses embeddings with a lexical fallback
+Context: on the ten evaluation SIRs, a BM25F lexical retriever over Mathlib
+names, docstrings and types found a relevant premise in the top ten for 0/10
+cases using SIR content alone (5/10 with optimistic label hints). OpenRouter
+offers an embeddings endpoint and catalog. Choice: retrieve premises by
+embedding similarity over an index of the pinned Mathlib's public declarations,
+with the embedding model id in configuration, every call recorded and
+replayable, and vectors cached locally keyed by Mathlib commit, extractor hash
+and model. The lexical retriever remains the offline fallback when embeddings
+are unavailable. Retrieved premises only inform Lean generation; they never
+affect structure checks or statuses. Why: the spec calls for embeddings, and
+the lexical baseline is too weak to help the model.
+
+## 2026-10-20 — Live jobs settle explicitly and account every call
+Context: live work can become stale while a model call is running, callers can
+drop an issued job, dependency graphs can contain cycles, and an automatic
+retry loop can repeat paid failures indefinitely. Choice: each issued job has
+an opaque ticket; callers explicitly abandon dropped jobs, and late outcomes
+cannot release a replacement. Staleness includes dirty or in-flight transitive
+dependencies and an invalidation generation that survives an upstream result
+with the same SIR hash. Cycles and their downstream blocks settle immediately
+as structural errors without model calls. Runner failures are terminal until an
+edit or explicit retry requeues the block and its dependents. Usage from every
+returned outcome is counted before stale-result rejection, including failed
+outcomes and unknown fields. Why: the scheduler must make progress without
+applying old meaning, hiding paid calls, or creating an unbounded retry loop.
+
+## 2026-10-20 — Lean environment compaction is caller-coordinated
+Context: the pinned REPL retains command and proof snapshots for the lifetime
+of its process, so environment ids and memory grow during a long editing
+session. Restarting invalidates every process-local `EnvSnapshot`, while the
+worker does not own the accepted source journal needed to rebuild them. Choice:
+transport failures put the worker in an explicit restart-required state, and
+maintenance compaction is performed by the live engine between document
+revisions: restart, replay accepted generated sources in dependency order, and
+replace every retained snapshot. The restart threshold remains configurable
+and will be chosen after a long-session response-count/RSS benchmark. Why: an
+arbitrary worker-local interval could silently discard the only incremental
+checkpoints the caller still relies on.

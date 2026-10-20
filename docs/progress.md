@@ -46,10 +46,15 @@ cross-block representation consistency and tuning on the same corpus.
       (headless; GUI-only rendering listed in `validation.md`).
 - [x] Pass relevant tests, resolve independent review, document and commit.
 
-## M4 — Live mode (not started)
-- [ ] Implement daemon, document diffing, narrow Jev decisions and active-block gates.
-- [ ] Implement scheduler, transitive invalidation and SIR/dependency cache keys.
-- [ ] Implement incremental Lean checks and Mathlib premise retrieval.
+## M4 — Live mode (active)
+- [ ] Research TeXmacs edit/cursor hooks, timers and persistent connections;
+      research Mathlib premise retrieval (`research/m4-*.md`).
+- [x] Implement live document state, diffing, transitive invalidation,
+      SIR/Lean caches, gates and scheduler with stale-result discarding.
+- [x] Implement narrow Jev decisions with thresholds and fallbacks.
+- [x] Implement incremental Lean checks (environment snapshots).
+- [ ] Implement Mathlib premise retrieval for Lean generation.
+- [ ] Implement the daemon protocol and live plugin client.
 - [ ] Verify cosmetic edits, moves, reopen, dependency edits and stale responses.
 - [ ] Pass relevant tests, resolve independent review, document and commit.
 

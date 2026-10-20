@@ -183,3 +183,22 @@ These results support the M2 go decision only within the limits stated in
   rendering, tooltips, review-card dialog rendering and button callbacks, footer
   repaint. The logic behind each is exercised headless; a manual GUI pass is
   still owed.
+
+## 2026-10-20 — M4 live-core checkpoint
+
+- `make test` passed after the worker, decision and live-state reviews: evaluator
+  tests, formatting, strict Clippy, and the full offline workspace suite. The
+  suite includes 25 decision tests (plus one ignored fixture regenerator), 31
+  live-engine integration tests, 11 worker fixture tests and the unchanged M1–M3
+  regression suites. Loopback model-adapter tests required the normal local
+  socket permission; no provider call was made.
+- The focused real-Lean snapshot test
+  `restore_discards_later_branches_and_reaches_base` passed against the pinned
+  runtime. It checks branch isolation and restoration to the import-only base.
+- Independent reviews found the per-block batch refactor behavior-preserving,
+  the timeout/restart worker semantics sound, and the live scheduler clean after
+  extra probes for late completions, review changes, identical upstream SIR
+  hashes, and cycle repair around an in-flight job.
+- This checkpoint validates transport-independent M4 components only. Premise
+  retrieval, the daemon, the live TeXmacs client and full live real-Lean replay
+  remain unfinished and are not claimed here.
