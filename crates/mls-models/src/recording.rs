@@ -1,6 +1,7 @@
 use crate::openrouter::{
     bound_embedding_error, embedding_hash, validate_answers, validate_embedding_request,
-    validate_embedding_usage, validate_embeddings, validate_model,
+    validate_embedding_resolved_model, validate_embedding_usage, validate_embeddings,
+    validate_model,
 };
 use crate::{
     DecisionReply, DecisionRequest, EmbeddingClient, EmbeddingReply, EmbeddingRequest,
@@ -604,7 +605,7 @@ impl EmbeddingClient for ReplayClient {
                 }),
             })
         };
-        validate_model(&request.model, &reply.metadata.resolved_model).map_err(fail)?;
+        validate_embedding_resolved_model(&reply.metadata.resolved_model).map_err(fail)?;
         if reply.metadata.configured_model != request.model
             || !(200..300).contains(&reply.metadata.http_status)
             || envelope

@@ -123,7 +123,7 @@ impl EmbeddingClient for OpenRouterClient {
         let fail = |message: String| {
             bound_embedding_error(raw.failure(message, Some(&wire.model), Some(usage.clone())))
         };
-        validate_model(&request.model, &wire.model).map_err(fail)?;
+        validate_embedding_resolved_model(&wire.model).map_err(fail)?;
         if wire.data.len() != request.input.len() {
             return Err(fail("embedding row count differs from input count".into()));
         }
@@ -535,6 +535,16 @@ fn redact_value(value: &mut Value, api_key: &str) {
     }
 }
 
+pub(crate) fn validate_embedding_resolved_model(resolved: &str) -> Result<(), String> {
+    // Embedding routers may return a backend ID such as parasail-bge-m3 for baai/bge-m3.
+    // Keep that reported identity for audit; the configured request model remains exact.
+    if resolved.is_empty() || resolved.trim() != resolved || resolved.len() > 256 {
+        Err("embedding response model ID must be nonempty, trimmed, and at most 256 bytes".into())
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn validate_model(configured: &str, resolved: &str) -> Result<(), String> {
     // OpenRouter may canonicalize vendor/model capitalization. Preserve the reported ID in
     // metadata while accepting only the complete configured ID or its hyphen-delimited version.
@@ -770,12 +780,34 @@ mod tests {
             ("baai/bge-m3", "BAAI/bge-m3 "),
             ("baai/bge-m3", "BAAI/bgé-m3"),
             ("anthropic/claude-sonnet-5", "ANTHROPIC/CLAUDE-SONNET-55"),
+            ("anthropic/claude-sonnet-5", "parasail-bge-m3"),
             ("typesafe/jev-1.14", "TYPESAFE/JEV-1.140"),
+            ("typesafe/jev-1.14", "parasail-bge-m3"),
         ] {
             assert!(
                 validate_model(configured, resolved).is_err(),
                 "{configured:?} / {resolved:?}"
             );
+        }
+    }
+
+    #[test]
+    fn embedding_backend_identity_is_trimmed_and_bounded_without_a_model_prefix_requirement() {
+        for resolved in [
+            "parasail-bge-m3".to_owned(),
+            "BAAI/bge-m3".into(),
+            "x".repeat(256),
+        ] {
+            assert!(validate_embedding_resolved_model(&resolved).is_ok());
+        }
+        for resolved in [
+            "".to_owned(),
+            " \t\n".into(),
+            " parasail-bge-m3".into(),
+            "parasail-bge-m3 ".into(),
+            "x".repeat(257),
+        ] {
+            assert!(validate_embedding_resolved_model(&resolved).is_err());
         }
     }
 

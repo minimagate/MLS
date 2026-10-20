@@ -131,8 +131,11 @@ fn embedding_query_purpose_and_reported_zero_cost_are_preserved() {
 }
 
 #[test]
-fn embedding_canonical_provider_case_records_and_replays_without_changing_request_identity() {
-    for (index, resolved) in ["BAAI/bge-m3", "BAAI/BGE-M3-V1"].into_iter().enumerate() {
+fn embedding_backend_identity_records_and_replays_without_changing_request_identity() {
+    for (index, resolved) in ["BAAI/bge-m3", "BAAI/BGE-M3-V1", "parasail-bge-m3"]
+        .into_iter()
+        .enumerate()
+    {
         let directory = std::env::temp_dir().join(format!(
             "mls-embeddings-canonical-case-{index}-{}",
             std::process::id()
@@ -158,6 +161,43 @@ fn embedding_canonical_provider_case_records_and_replays_without_changing_reques
             ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
         assert_eq!(replay.embed(&embedding_request()).unwrap(), reply);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn embedding_backend_identity_rejects_blank_untrimmed_and_oversized_http_and_replay_values() {
+    let original = embedding_record("invalid-backend");
+    for resolved in [
+        "".to_owned(),
+        " \t".into(),
+        " parasail-bge-m3".into(),
+        "parasail-bge-m3 ".into(),
+        format!("baai/bge-m3-{}", "x".repeat(256)),
+    ] {
+        let mut body = embedding_response();
+        body["model"] = json!(resolved);
+        let (origin, _) = serve_json(200, body);
+        let mut client =
+            OpenRouterClient::new(embedding_config(origin), "local-test-secret").unwrap();
+        assert!(
+            matches!(
+                client.embed(&embedding_request()),
+                Err(ModelError::Provider { .. })
+            ),
+            "{resolved:?}"
+        );
+
+        let mut call = original.clone();
+        call.resolved_model = Some(resolved.clone());
+        call.response.as_mut().unwrap()["metadata"]["resolved_model"] = json!(resolved);
+        let mut replay = ReplayClient::new(vec![call], GENERATION_MODEL, DECISION_MODEL).unwrap();
+        assert!(
+            matches!(
+                replay.embed(&embedding_request()),
+                Err(ModelError::Provider { .. })
+            ),
+            "{resolved:?}"
+        );
     }
 }
 
@@ -380,7 +420,14 @@ fn invalid_embedding_inputs_are_rejected_before_transport() {
         "local-test-secret",
     )
     .unwrap();
-    for mutation in ["empty", "blank", "model", "dimensions", "configuration"] {
+    for mutation in [
+        "empty",
+        "blank",
+        "model",
+        "dimensions",
+        "configuration",
+        "configuration-dimensions",
+    ] {
         let mut request = embedding_request();
         match mutation {
             "empty" => request.input.clear(),
@@ -388,6 +435,7 @@ fn invalid_embedding_inputs_are_rejected_before_transport() {
             "model" => request.model.clear(),
             "dimensions" => request.dimensions = 0,
             "configuration" => request.model = "openai/text-embedding-3-small".into(),
+            "configuration-dimensions" => request.dimensions = 4,
             _ => unreachable!(),
         }
         assert!(
@@ -428,7 +476,7 @@ fn invalid_embedding_rows_models_and_cost_retain_known_failure_usage() {
             "dimension" => body["data"][0]["embedding"] = json!([1.0, 0.0]),
             "base64" => body["data"][0]["embedding"] = json!("AAAA"),
             "coordinate" => body["data"][0]["embedding"][0] = json!("NaN"),
-            "model" => body["model"] = json!("baai/bge-m30"),
+            "model" => body["model"] = json!(""),
             "absent-model" => {
                 body.as_object_mut().unwrap().remove("model");
             }
@@ -625,8 +673,8 @@ fn rejected_successful_embedding_replay_normalizes_cost_and_preserves_evidence()
         response["metadata"]["usage"]["cost"] = json!(-0.25);
         match rejection {
             "model" => {
-                response["metadata"]["resolved_model"] = json!("unrelated/model");
-                call.resolved_model = Some("unrelated/model".into());
+                response["metadata"]["resolved_model"] = json!("");
+                call.resolved_model = Some("".into());
             }
             "shape" => response["embeddings"][0] = json!([]),
             "cost" => {}
