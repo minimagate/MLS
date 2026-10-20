@@ -94,10 +94,12 @@ Exactly one of `--replay DIR` (offline, strict request matching) or `--live` is
 required. Live calls also require `MLS_LIVE=1` and `OPENROUTER_API_KEY`, and
 are recorded under `<document dir>/.mls/log/batch-<UUID>/`, the path printed to
 stderr. The command writes a document-adjacent pinned Lake project with one
-generated `Shadow/SectionN.lean` per section (`lake build Shadow` compiles it)
-and only touches files it owns. Results are unconfirmed drafts: statuses are
-`sir_drafted` or `formalization_error`; nothing is reported as confirmed or
-verified. Each structure check is `matched`, `mismatch` or `unchecked`, and
+generated `Shadow/<Module>/SectionN.lean` per section, where `<Module>` is
+derived from the document file name (`lake build Shadow` compiles it)
+and only touches files it owns. Batch results are unconfirmed drafts: statuses
+are `not_formalized` (no usable SIR), `sir_drafted` or `formalization_error`
+(an SIR without an accepted Lean statement); only the M3 review flow can
+produce `statement_confirmed`, and nothing is reported as verified. Each structure check is `matched`, `mismatch` or `unchecked`, and
 semantic content (types, hypothesis and conclusion text) is always unchecked in
 M2. `--max-attempts N` bounds Lean repairs per statement (default 3).
 
@@ -114,3 +116,37 @@ MLS_LIVE=1 python3 evals/run.py --live --max-attempts 2
 `make test-lean` additionally runs the real-Lean worker, pipeline and batch
 tests. Real-Lean tests skip themselves unless `MLS_LEAN_TESTS=1`, which
 `make test-lean` sets.
+
+## TeXmacs review (M3)
+
+The thin TeXmacs plugin in `texmacs-plugin/mls` drives the engine's review
+commands (`mls review-run`, `review-action`, `review-status`; see
+[docs/protocol.md](docs/protocol.md)). It saves the document, runs a batch
+formalization, and shows an auxiliary "MLS status" panel with one row per block
+(status, tooltip message, go-to and review actions) plus a footer badge. A
+review card shows the SIR, structure checks and Lean statement, with Confirm,
+Reject and Edit. Human decisions are stored next to the document in
+`.mls/review/`; a statement becomes `statement_confirmed` only when a reviewer
+confirmed (or edited) that exact SIR, its Lean statement was accepted, and all
+its dependencies are confirmed. Block identity follows the TeXmacs tree, so a
+TeXmacs re-save that only changes layout keeps confirmations and needs no
+model call. The plugin writes nothing into the document except the identity
+metadata added by `mls --write-ids`.
+
+Install for your own TeXmacs (not done automatically):
+
+```sh
+cargo build -p mls-cli
+ln -s "$PWD/texmacs-plugin/mls" ~/.TeXmacs/plugins/mls
+```
+
+Set the `MLS_BIN` environment variable or the plugin's engine preference to
+`target/debug/mls` when TeXmacs is started from Finder. Replay runs need a
+recordings directory; live runs need the "Allow live model calls" menu toggle,
+`OPENROUTER_API_KEY` and `MLS_LIVE=1` in TeXmacs' environment.
+
+`make test-texmacs` runs the headless plugin suite against a stub engine and
+the real `review-status`; `MLS_LEAN_TESTS=1 make test-texmacs` adds the real
+end-to-end review flow with replayed model calls and real Lean.
+`MLS_TEXMACS_TESTS=1 cargo test -p mls-tm --test texmacs_roundtrip` checks that
+real TeXmacs saves leave block identities and canonical text unchanged.

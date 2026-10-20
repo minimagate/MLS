@@ -157,3 +157,29 @@ changes were excluded from the snapshot.
 
 These results support the M2 go decision only within the limits stated in
 `evals.md`. No status in M2 is confirmed or verified.
+
+## 2026-10-20 — M3 TeXmacs review acceptance
+
+- `make test` (243 Rust test entries plus evaluator tests, formatting and
+  strict Clippy), `make test-lean` (real REPL, worker, pipeline and batch),
+  `make test-texmacs` and `MLS_LEAN_TESTS=1 make test-texmacs` (319 headless
+  TeXmacs 2.1.5 checks in 10 files) passed. The gated real end-to-end test drives
+  the plugin's own procedures against the real `mls` binary with replayed model
+  calls and real Lean: two drafts, confirming the dependent block waits for its
+  dependency, confirming both yields `statement_confirmed` without model calls,
+  and rejection yields `not_formalized` with a rerun request (42 checks).
+- A 40-seed property test asserts the confirmation contract over random
+  sequences of confirmations, rejections, edits, text edits and label renames.
+- Block identity: real TeXmacs load-and-save of 40 sampled installed documents
+  (340 blocks) left every canonical block text unchanged; an oracle using
+  TeXmacs' own parser on 44,000 generated sources found 0 cases where different
+  trees share a canonical text (63 before the reader-alignment fixes). All 424
+  installed English documents parse, and `--write-ids` is idempotent on copies
+  of all 424. One document is refused for raw data, a TeXmacs limitation.
+- Plugin safety reviews found no shell injection or evaluation of engine text
+  (hostile names, paths and `<action|…>` content stay inert). Saves are verified
+  by re-importing the file; reloads by carrier-stripped tree equality.
+- Not verified (no GUI automation available): menu and shortcut, colored panel
+  rendering, tooltips, review-card dialog rendering and button callbacks, footer
+  repaint. The logic behind each is exercised headless; a manual GUI pass is
+  still owed.

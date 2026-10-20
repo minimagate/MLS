@@ -188,3 +188,88 @@ Choice: leave the wording unchanged in the M2 commit, so the committed prompts
 are exactly those that produced, and replay, evaluation run 3. Why: changing
 prompts invalidates the recorded evidence; the wording is revisited with the
 next prompt change.
+
+## 2026-10-20 — M3 human review semantics
+Context: spec §8 requires human confirmation of each SIR before a statement
+counts as confirmed, and pins confirmed SIRs until the block's meaning changes.
+Choice: a document-scoped review store records `confirmed` (optionally
+human-edited) and `rejected` SIRs, each bound to the block's text hash and SIR
+semantic hash. A confirmed SIR is reused without a model call while the text is
+unchanged. After a text change the SIR is regenerated; an identical semantic
+hash keeps the confirmation (cosmetic edit, §8 step 6), a different one returns
+the block to `sir_drafted` and shows the difference. Rejected SIRs are sent
+back to the model as a negative example; an identical regeneration stays
+unformalized. `statement_confirmed` requires a human decision in effect and an
+accepted Lean statement for that exact SIR. Accepted Lean statements for
+confirmed SIRs are cached by the §4 key (SIR hash plus dependency SIR hashes)
+and re-checked locally before any regeneration. Why: confirmation must never be
+inferred from model output, and unchanged meaning must not cost model calls.
+
+## 2026-10-20 — M3 markers in a status panel; JSON over short commands
+Context: the investigation in `research/m3-texmacs.md` found no GUI-visible
+marker in TeXmacs 2.1.5 that leaves the saved document and its LaTeX export
+unchanged; colored wrappers, balloons and style macros all alter the document.
+Choice: the document carries only `mls-id` carriers. Per-block markers live in
+an auxiliary "MLS status" buffer (colored status, tooltip message, go-to and
+review actions); the badge is the footer message plus the panel header. The
+plugin runs short `mls review-*` commands and parses their JSON with a pure
+Scheme reader, never evaluating engine output (protocol in `protocol.md`). Live
+model calls need an explicit menu toggle in addition to `MLS_LIVE=1`.
+Why: this keeps documents byte-stable and the plugin a thin, replaceable client.
+The spec's "marker per block" is met by the panel row, not an in-text mark.
+
+## 2026-10-20 — Unformalized versus failed, and confirmation through dependencies
+Context: M3 adds `not_formalized` to the status vocabulary. A failed SIR call,
+an SIR whose kind, label or uses disagree with the source, a non-UTF-8 block
+and a blocked dependency have no usable SIR, so calling them formalization
+errors overstated progress. A review also showed that a confirmed block could
+reach `statement_confirmed` on top of an unconfirmed dependency, and that the
+status view trusted stored reports after the document changed.
+Choice: those cases report `not_formalized`; `formalization_error` means a
+usable SIR exists but no Lean statement was accepted. `statement_confirmed`
+additionally requires every formal dependency to be `statement_confirmed`;
+otherwise the confirmed block waits as `sir_drafted`. The view re-checks text,
+SIR identity and the §4 dependency key against the current document, and any
+drift downgrades the block and asks for a rerun. Why: a confirmed statement
+must rest only on confirmed meaning, and stale state must never look current.
+
+## 2026-10-20 — Per-document shadow modules
+Context: spec §9 shows one flat `Shadow/SectionNN.lean` set per project, but the
+project lives next to the document, so two documents in one directory claimed
+the same files and the second was refused. Choice: each document writes
+`.mls/Shadow/<Module>/SectionN.lean`, where `<Module>` is `Doc_`, the sanitized
+ASCII file stem (at most 40 characters), `_` and the first eight hex digits of
+the file name's SHA-256. Ownership markers and manifests are per module. An M2
+flat layout is removed only when its owner marker names the same document, and
+only its manifest-listed regular files. Why: documents sharing a directory are
+common, and generated files must stay attributable to exactly one document.
+
+## 2026-10-20 — Block identity from the TeXmacs tree, not source layout
+Context: an end-to-end test through the plugin showed that TeXmacs 2.1.5
+re-serializes every block on save (long forms, indentation) without changing
+the document tree. Hashing raw bytes therefore made every save look like a text
+edit: confirmations went stale, SIRs were regenerated at model cost, and
+recorded requests stopped matching. Choice: supersede the M1 rule that block
+hashes use raw bytes. Each block gets a canonical text derived from the parsed
+tree under TeXmacs' own reader rules (layout whitespace ignored, content
+whitespace and structure kept, identity carriers removed). `text_hash` hashes
+that text, and model prompts use it. Source spans and every write remain
+byte-exact. Validation: the canonical text of each block must be unchanged by a
+real TeXmacs load-and-save, and texts TeXmacs reads as different trees must
+differ (checked against TeXmacs' own snippet parser on random sources). Known
+TeXmacs limitation: text after raw data inside a long-form argument is lost by
+TeXmacs itself on load; the plugin refuses documents that do not round-trip. Why: identity must follow meaning-bearing content,
+and TeXmacs, not MLS, owns the file's layout.
+
+## 2026-10-20 — Refuse rather than reinterpret malformed separators
+Context: TeXmacs never reads a bare `|` or `>` as text; inside a tag argument it
+splits the argument, and at body level the body fails to load. Such bytes only
+occur in hand-written, already malformed files, yet wrapping them in an
+identity carrier, or treating a carrier with them as transparent, would give
+MLS a different reading from TeXmacs. Choice: `--write-ids` refuses to wrap a
+span with a bare separator at the carrier's level and leaves the file
+untouched; canonicalization refuses such carriers (`canonicalization_failed`,
+no model call). The plugin refuses its first command when the file on disk
+differs from the buffer, so you save or revert in TeXmacs first. Why: MLS must
+read every block exactly as TeXmacs does, and must never write over content it
+did not create.

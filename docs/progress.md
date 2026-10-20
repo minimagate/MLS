@@ -32,11 +32,19 @@ with identical reports, are recorded in `evals.md`, together with the M2
 go/no-go assessment: go, with the stated limits on corpus size, SIR wording,
 cross-block representation consistency and tuning on the same corpus.
 
-## M3 — TeXmacs review (not started)
-- [ ] Implement batch protocol and thin Scheme plugin with persistent IDs.
-- [ ] Implement review cards (confirm/reject/edit), markers and document badge.
-- [ ] Verify human-confirmation invariants and real TeXmacs interaction.
-- [ ] Pass relevant tests, resolve independent review, document and commit.
+## M3 — TeXmacs review (complete)
+- [x] Research TeXmacs plugin loading, external commands, tree access, widgets
+      and headless testing (`research/m3-texmacs.md`).
+- [x] Implement review store, confirmed-SIR pinning, cosmetic reconfirmation,
+      rejection feedback, §4 Lean cache and M3 statuses in the engine.
+- [x] Implement the plugin-facing review commands and protocol (`protocol.md`).
+- [x] Implement thin Scheme plugin with persistent IDs, review cards
+      (confirm/reject/edit), markers (status panel) and document badge.
+- [x] Derive block identity from the TeXmacs tree so layout-only saves keep
+      confirmations (found by the real end-to-end test).
+- [x] Verify human-confirmation invariants and real TeXmacs interaction
+      (headless; GUI-only rendering listed in `validation.md`).
+- [x] Pass relevant tests, resolve independent review, document and commit.
 
 ## M4 — Live mode (not started)
 - [ ] Implement daemon, document diffing, narrow Jev decisions and active-block gates.
