@@ -131,6 +131,37 @@ fn embedding_query_purpose_and_reported_zero_cost_are_preserved() {
 }
 
 #[test]
+fn embedding_canonical_provider_case_records_and_replays_without_changing_request_identity() {
+    for (index, resolved) in ["BAAI/bge-m3", "BAAI/BGE-M3-V1"].into_iter().enumerate() {
+        let directory = std::env::temp_dir().join(format!(
+            "mls-embeddings-canonical-case-{index}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut body = embedding_response();
+        body["model"] = json!(resolved);
+        let (origin, captured) = serve_json(200, body);
+        let client = OpenRouterClient::new(embedding_config(origin), "local-test-secret").unwrap();
+        let mut recorder = RecordingClient::new(
+            client,
+            &directory,
+            GENERATION_MODEL,
+            DECISION_MODEL,
+            "synthetic",
+        );
+        let reply = recorder.embed(&embedding_request()).unwrap();
+        assert_eq!(reply.metadata.configured_model, EMBEDDING_MODEL);
+        assert_eq!(reply.metadata.resolved_model, resolved);
+        assert_eq!(reply.metadata.provider_response["model"], resolved);
+        assert_eq!(captured.recv().unwrap().2["model"], EMBEDDING_MODEL);
+        let mut replay =
+            ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
+        assert_eq!(replay.embed(&embedding_request()).unwrap(), reply);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
 fn rejected_embedding_costs_are_unknown_while_valid_tokens_still_aggregate() {
     let mut usages = Vec::new();
     for invalid_cost in [json!(-0.25), json!("NaN"), json!("Infinity")] {

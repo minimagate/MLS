@@ -536,11 +536,15 @@ fn redact_value(value: &mut Value, api_key: &str) {
 }
 
 pub(crate) fn validate_model(configured: &str, resolved: &str) -> Result<(), String> {
-    if resolved == configured
-        || resolved
-            .strip_prefix(configured)
-            .is_some_and(|tail| tail.starts_with('-'))
-    {
+    // OpenRouter may canonicalize vendor/model capitalization. Preserve the reported ID in
+    // metadata while accepting only the complete configured ID or its hyphen-delimited version.
+    let matching_prefix = resolved
+        .get(..configured.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(configured));
+    let valid_suffix = resolved
+        .get(configured.len()..)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('-'));
+    if !configured.trim().is_empty() && matching_prefix && valid_suffix {
         Ok(())
     } else {
         Err("provider returned an unrelated or empty model ID".into())
@@ -731,6 +735,49 @@ const _: Option<(NoulAnswer, ChoiceAnswer)> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_model_identity_accepts_ascii_case_and_hyphen_versions() {
+        for (configured, resolved) in [
+            ("baai/bge-m3", "BAAI/bge-m3"),
+            ("BAAI/BGE-M3", "baai/bge-m3"),
+            ("baai/bge-m3", "BAAI/BGE-M3-V1"),
+            (
+                "anthropic/claude-sonnet-5",
+                "ANTHROPIC/CLAUDE-SONNET-5-20261001",
+            ),
+            ("typesafe/jev-1.14", "TypeSafe/JEV-1.14-VERSION"),
+        ] {
+            assert!(
+                validate_model(configured, resolved).is_ok(),
+                "{configured} / {resolved}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_model_identity_rejects_empty_unrelated_and_near_prefixes() {
+        for (configured, resolved) in [
+            ("", ""),
+            ("", "BAAI/bge-m3"),
+            (" ", " "),
+            ("baai/bge-m3", ""),
+            ("baai/bge-m3", "unrelated/model"),
+            ("baai/bge-m3", "BAAI/bge-m30"),
+            ("baai/bge-m3", "BAAI/bge-m3_other"),
+            ("baai/bge-m3", "BAAI/bge-m3/other"),
+            ("baai/bge-m3", "BAAI/bge-m3:other"),
+            ("baai/bge-m3", "BAAI/bge-m3 "),
+            ("baai/bge-m3", "BAAI/bgé-m3"),
+            ("anthropic/claude-sonnet-5", "ANTHROPIC/CLAUDE-SONNET-55"),
+            ("typesafe/jev-1.14", "TYPESAFE/JEV-1.140"),
+        ] {
+            assert!(
+                validate_model(configured, resolved).is_err(),
+                "{configured:?} / {resolved:?}"
+            );
+        }
+    }
 
     #[test]
     fn rejected_nonfinite_embedding_cost_preserves_tokens_as_cost_becomes_unknown() {
