@@ -1,95 +1,167 @@
-# M4 TeXmacs live mode: research (PARTIAL)
+# M4 TeXmacs live mode: completed stock-bundle investigation
 
-Status: **partial checkpoint**, written 2026-10-20 when the session was paused. Questions 1, 2 and 5 are not yet executed, and the Q4 scenario script needs a fix before the remaining framing cases can run. Resume from "Remaining work".
+Scope: GNU TeXmacs **2.1.5**, 2026-10-20, stock application bundle at
+`/Applications/TeXmacs.app/Contents/Resources/share/TeXmacs/`.
+All runtime findings below use its Qt **offscreen** event loop, except the explicitly
+identified earlier headless result. They establish Scheme/protocol behavior, not real GUI UX.
+The owner's patched `~/.my-texmacs`, `~/.TeXmacs`, and visible GUI were not accessed or changed.
 
-Target: TeXmacs 2.1.5 bundle at `/Applications/TeXmacs.app/Contents/Resources/share/TeXmacs/` (paths below are relative to `progs/` unless stated). The bundle's `progs` tree was read, not the user's patched `~/.my-texmacs` copy (not read, per the constraint on that directory). `TEXMACS_PATH` in the user's shell points at `~/.my-texmacs/TeXmacs`, so the findings below apply to the stock 2.1.5 bundle and must be re-checked against the patched tree before M4 code relies on them.
+## Harness and reproducibility
 
-Harness (all executed, scratch only under `scratchpad/m4-research-tm/`):
-- Every run used fresh `HOME` and `TEXMACS_HOME_PATH` directories, `TEXMACS_PATH` set to the bundle, and `perl -e 'alarm 120; exec @ARGV'`.
-- `-H` (headless) mode: the process exits as soon as `-x` returns, so no timers or event loop run. This explains the M3 finding that `delayed` never fired.
-- Non-headless with `QT_QPA_PLATFORM=offscreen` (Qt offscreen platform plugin shipped in `Contents/Plugins/platforms/libqoffscreen.dylib`): the real Qt event loop runs without a window. This is the mode used for all timer and async results below. It is an approximation of the GUI and is labelled as such.
-- Stub engine: `scratchpad/m4-research-tm/daemon/probe_daemon.py` (line-delimited JSON in, DATA frames out).
+New scratch harness and retained evidence: `/private/tmp/mls-tm-live-j0qe53am/` (`LAB` below).
+Each `run.py` invocation creates a fresh `runs/<case>-*/userhome`, `texhome`, and document copy;
+sets `HOME`, `TEXMACS_HOME_PATH`, and stock `TEXMACS_PATH`; and unsets live-model credentials.
+Every TeXmacs launch is bounded by `perl -e 'alarm 45; exec @ARGV'`, with
+`QT_QPA_PLATFORM=offscreen`, `-s -x '(load "…/scm/<probe>.scm")'`, and stdin closed.
+The controlled Python daemon also has its own 25-second alarm. No existing process was stopped.
+Successful runs exited 0; an initial sandbox launch aborted during initialization, and one
+scratch Q1 syntax error expired under its alarm before the corrected probes succeeded.
+Offscreen execution required sandbox escalation on this host.
 
-Legend: **EXECUTED (headless -H)**, **EXECUTED (offscreen Qt loop)**, **NOT EXECUTED**, **GUI-ONLY** (cannot be checked in either mode).
+Commands actually used, with every invocation creating another isolated profile:
 
-## Q3. Timers and idle (EXECUTED, offscreen Qt loop)
+```sh
+LAB=/private/tmp/mls-tm-live-j0qe53am
+python3 "$LAB/run.py" slow q4.scm
+python3 "$LAB/run.py" command_frame q4.scm
+python3 "$LAB/run.py" scheme_frame q4.scm
+python3 "$LAB/run.py" unicode q4.scm
+python3 "$LAB/run.py" unicode_ascii q4.scm
+python3 "$LAB/run.py" write q4.scm
+python3 "$LAB/run.py" q1-buffer q1.scm
+python3 "$LAB/run.py" q2-inclusive q2.scm
+python3 "$LAB/run.py" q5 q5.scm
+python3 "$LAB/run.py" q6 q6.scm
+target/debug/mls "$LAB/runs/q5-b7kyu895/serialized.tm"
+```
 
-- `delayed` is a macro (`kernel/texmacs/tm-dialogue.scm:113`) that builds a closure and passes it to `exec-delayed-pause`. The closure returns `#t` when done, or a number of ms to wait before the next call.
-- A plain body is wrapped as `(lambda () body... #t)` (`delayed-sub`, tm-dialogue.scm:40-44), so `(delayed (:every N) body)` runs **once**, not repeatedly. Repetition needs a chain: the body schedules the next `delayed` and returns `#t`.
-- Observed: `exec-delayed`, `(delayed (:pause N))`, and a chained 100 ms tick all fired. The chained tick ran 12 times at about 100 ms intervals (log in `runs/e2e.*`). `(delayed (:idle 300))` fired after about 300 ms without input.
-- `(idle-time)` returns ms since the last user input and grows while idle. `(change-time)` is a timestamp that stayed constant while nothing changed; I did not yet measure how it moves on an edit.
-- A raw `exec-delayed` thunk that returns a number did **not** reschedule in my test. Use the chain pattern instead, and do not rely on the numeric return.
-- `-H` exits after `-x`, so headless tests that need timers must run without `-H`.
+The final command is read-only CLI inspection, with no models or `--write-ids`.
+Each run retains `command.json`, `probe.log`, `stdout.log`, and `stderr.log`;
+connection runs also retain `daemon.log`. Q5 retains `serialized.tm` and `inspect.json`.
+Earlier checkpoint logs were also checked: `c1.zyEMJu/e3.log`, `s-bnow.Dc6Nbb/e4.log`,
+and `s-ptr.eD5TYc/e4.log` under the previous scratch harness's `runs/` directory:
+`/private/tmp/claude-501/-Users-michelangelogubinelli-Github-MLS/0ae94e67-b04f-4014-afda-3be0edc1be8e/scratchpad/m4-research-tm/`.
 
-## Q4. Persistent engine connection (partly EXECUTED, offscreen Qt loop)
+## Q4. Persistent connection and framing — executed first
 
-Setup: `plugin-configure` with `(:launch "env PROBE_LOG=... python3 probe_daemon.py [banner]")`. The plugin's init file is copied into a fresh `TEXMACS_HOME_PATH/plugins/`. `(lazy-plugin-force)` starts it. Plugin registration works (`plugin-list` contains the probe).
+The broken nested scenario `cond` was replaced with a small dispatch function.
+A temporary `mlsprobe` plugin registers `:launch`; `connection-start` returns `"ok"`.
+Frames are DATA_BEGIN (0x02), `verbatim:`, payload, DATA_END (0x05), without a trailing newline.
+The daemon accepts newline-delimited JSON requests. No startup banner is used in the new probes.
 
-| Case | Result | Status |
-|---|---|---|
-| `connection-start` | returns `"ok"` | EXECUTED (offscreen) |
-| `connection-eval` with a string request | returns the next frame as `(document "...")`; payload is text after `verbatim:` | EXECUTED (offscreen) |
-| Pushes sent by the daemon while idle | arrive in `connection-notify` with `ch="output"`, one per frame, about every 300 ms while the UI is idle | EXECUTED (offscreen) |
-| Banner, eval right after start (no event-loop pump) | the first `connection-eval` returns the banner; every later reply is off by one | EXECUTED (offscreen). Reproduces the M3 offset. |
-| Banner, after the event loop has run for about 0.5 s | the banner arrives through `connection-notify`; evals are not offset | EXECUTED (offscreen). The banner race is timing dependent. |
-| Unsolicited frame sent before the reply to an eval | the eval returns **both** frames concatenated: `(document (concat "push..." "reply..."))` | EXECUTED (offscreen). Pushes that land during an eval corrupt the reply. |
-| Unicode and `<>&"` in JSON | not run (scenario script bug, see below) | NOT EXECUTED |
-| `command:` and `scheme:` frames | not run | NOT EXECUTED |
-| `connection-write-string` (fire and forget) | not run | NOT EXECUTED |
-| Blocking: heartbeat timer while a 2 s `slow` eval runs | not run | NOT EXECUTED |
-| `connection-notify` override | `(tm-define (connection-notify lan ses ch t) (former lan ses ch t) ...)` chains with `utils/plugins/plugin-eval.scm:191` and was observed working | EXECUTED (offscreen) |
-| Channel names | `"output"` observed; `"prompt"` and status channels from source (plugin-eval.scm:106-111, 200) | source only |
-| Clean shutdown | `connection-stop` and quit; daemon exit on stdin close not checked | NOT EXECUTED |
+| Probe | Observed result |
+|---|---|
+| `slow-atz653to` | A 2-second `connection-eval` took **2005 ms**; the 50-ms heartbeat made **0** ticks during it. |
+| `write-2yy2oe5x` | `connection-write-string` returned unspecified; its reply arrived asynchronously through `connection-notify`, channel `"output"`. |
+| `command_frame-7sr1w56j` | A controlled `command:` frame **executed** the registered Scheme callback. Eval returned empty; the following JSON reply arrived through notify. |
+| `scheme_frame-_8hhbzaz` | `scheme:` produced `(document "scheme-hello")`, rather than JSON text. |
+| `unicode-dwbntl8y` | Literal UTF-8 became TeXmacs internal text: `é` became byte 0xe9, `∀` became `<forall>`, and angle brackets became `<less>`/`<gtr>`. It was not a UTF-8 JSON byte round trip. |
+| `unicode_ascii-rfx2oxdj` | ASCII JSON containing `\u00e9\u2200`, `<tag>`, `&`, and escaped quotes survived intact. |
 
-Notes:
-- Framing per `doc/devel/interface/interface-pipes.en.tm` and `progs/utils/plugins/plugin-cmd.scm:39`: DATA_BEGIN (0x02) + `verbatim:` + text + DATA_END (0x05). `DATA_ESCAPE` is 0x1b. The daemon writes no newline after DATA_END.
-- The docs say that output must be one outer block per reply, and that a later block may be read before earlier output is consumed. The merge seen above is consistent with this.
-- Blocking: `connection-eval` blocks the UI until a frame arrives. Not yet measured.
+The raw-Unicode TeXmacs run exited 0; the first Python log printer failed to decode its
+Cork bytes as UTF-8. Reading the retained bytes with escaped invalid sequences confirmed the conversion.
+The existing MLS JSON parser already decodes `\u` escapes, including surrogate pairs.
 
-Engineering consequence so far: do not use `connection-eval` for replies that might race with pushes. Route every frame through `connection-notify` and match replies by request id. The daemon should send no banner, and the plugin should not depend on eval order. Re-check after the remaining cases run.
+Earlier executed observations were confirmed in the retained checkpoint logs:
+- An immediate eval consumed a startup banner, leaving replies one request behind.
+- A push arriving during eval merged with its reply into one `(document (concat …))`.
+- Idle pushes reached `connection-notify` about every 300 ms.
 
-## Q1. Observing edits (NOT EXECUTED; source only)
+Therefore eval is unsuitable for the live path: it blocks timers and has no reliable
+request/reply separation when unsolicited output exists. Notify trees also need structural
+text extraction, not Scheme evaluation or blind conversion with `object->string`.
+`command:` handling occurs before the JSON notify handler: a notify-only parser is **not**
+a sandbox against executable frame types. The trusted daemon/transport must emit only `verbatim:` JSON.
+`connection-stop` was called before quitting; a read-only check of all six probe daemon
+PIDs showed none remained. A graceful stdin-EOF handshake was not established by these runs.
 
-- `buffer-notify` (`part/part-shared.scm:211`) is a `tm-define` called by the C++ notifier with `event` `'announce` and a modification `mod`. The C++ `buffer-attach-notifier` glue exists (`prog/glue-symbols.scm:726`, docs `glue-auto-doc.en.tm:5590`). It is lazy-loaded through `init-texmacs.scm:427`, and it is designed for shared parts, so using it means overriding a shared-part hook. The string `buffer-notify` appears in the binary; whether the C++ calls it for every edit is **NOT EXECUTED**.
-- `notify-cursor-moved` (`utils/library/cursor.scm:141`) is a no-op hook. It is documented as called after any cursor movement, including the mouse. **NOT EXECUTED.**
-- `keyboard-press` (`utils/misc/gui-utils.scm:357`, plus several others) fires per key. An override can delegate explicitly through `former` (`kernel/texmacs/tm-define.scm:230-250`), preserving the previous implementation. Compatibility with the user's uninspected patched tree remains unverified. Keystrokes do not cover menu commands, paste or undo.
-- Plain `tm-define` redefinition replaces the master routine. Conditional definitions, including `:require` and `:mode`, may chain. The plugin should delegate through `former` rather than rely on condition ordering.
-- Cost per keystroke: **NOT MEASURED.**
+## Q1. Observing edits — executed
 
-## Q2. Cursor tracking (NOT EXECUTED; source only)
+Evidence: `q1-buffer-xnlgt5os/probe.log`.
+After loading `(part part-shared)`, overriding `buffer-notify` with a call to `former`,
+and attaching `buffer-attach-notifier` to the fixture URL:
+- Text insertion emitted six `announce`/`done` modification pairs.
+- Two root `tree-insert` operations emitted one pair each; a later text insertion emitted six pairs.
+- Total: **14 announce + 14 done** callbacks. Reattaching did not duplicate the observed events.
+- The chained `notify-cursor-moved` hook ran **46** times across startup, editing,
+  normalization, and cursor moves: neither hook is a one-callback-per-keystroke interface.
 
-- `(cursor-path)` is a glue primitive. `tree-innermost` (`utils/library/tree.scm:231`) walks up from the cursor and accepts a symbol, a list of symbols, or a predicate. A predicate on the mls carrier (`with` whose first child is `"mls-id"`) fits. `tree-go-to` and `tree->path` are at tree.scm:284-304.
-- Detecting that the cursor left a block: compare the carrier found by `tree-innermost` with the previous one, on each idle tick. Polling is cheaper to get right than relying on `notify-cursor-moved`. **NOT EXECUTED.**
+A startup-created temporary buffer could become active between delayed callbacks.
+Selecting the fixture explicitly before an edit resolved an initially misleading absence of notifications.
+Production callbacks must retain/check the document URL instead of assuming the active buffer is unchanged.
+`change-time` did not change synchronously with the insert, then advanced on later event-loop turns;
+use it as a coarse UI hint, not a per-block revision. Similarly, Q5 saw `buffer-modified?` still
+false immediately after an in-memory insert. Maintain a client dirty/revision counter instead.
+The probe logs every event for evidence; production hooks should only mark dirty and return.
+Keyboard/menu/paste/undo coverage and real keystroke overhead remain GUI checks.
 
-## Q5. Serialising the buffer in memory (NOT EXECUTED)
+## Q2. Cursor tracking — executed, including a boundary correction
 
-- `serialize-texmacs` (glue, `prog/glue-symbols.scm:470`, C++ `tree_to_texmacs`) is the candidate for producing canonical `.tm` text without saving. Not run yet. It must be checked against the M3 layout rule (blank lines after `<TeXmacs|…>` and before `<\body>`), and the result must be parsed with `mls FILE` (`crates/mls-cli/src/main.rs` `inspect`, no model calls, reads one `.tm` path, `--write-ids` only writes).
-- Until it is run, the design assumes the plugin sends a path to a saved file, as M3 does.
+Evidence: `q2-inclusive-tj4pceyf/probe.log`; source: `utils/library/tree.scm:231`.
+Use a predicate matching `(with "mls-id" UUID BODY)` with **`(tree-innermost carrier? #t)`**.
+The optional argument includes the cursor's enclosing node: the default drops an extra path component
+and missed the carrier at its wrapper start/end in this probe.
+The inclusive form found carrier A at both boundaries and inside its text, found carrier B
+inside nested math, and returned `#f` in the intervening/outside paragraphs.
+Comparing the previous UUID with the next result detected both A→outside and B→outside.
+Poll this ownership on a short idle tick; cursor notifications can merely request an earlier poll.
 
-## Q6. Re-rendering (NOT EXECUTED)
+## Q3. Timers and idle — earlier execution retained
 
-- The status panel is built by `mls-render-view` (`progs/mls-panel.scm`), which rebuilds the whole aux buffer. A per-block update would need `buffer-set-body` on the panel or a patch. No timing measured.
+Source: `kernel/texmacs/tm-dialogue.scm:40–113`.
+`delayed` wraps a plain body with a final `#t`; a plain `(:every N)` body consequently ran once.
+A body that explicitly schedules the next `delayed (:pause N)` reliably repeated
+(earlier evidence: 12 ticks at approximately 100 ms). `(:idle 300)` also fired while quiet.
+`idle-time` grew during quiet periods; scripted edits/moves reset it in the new probes.
+Headless `-H` exited when `-x` returned and did not service these timers; use the offscreen Qt loop
+for timer/connection integration tests. Physical mouse behavior remains unverified.
 
-## Recommended direction (provisional)
+## Q5. In-memory serialization — executed and parsed by MLS
 
-1. Connection: start the daemon through `plugin-configure :launch`, with no banner. Each request carries an id. Replies and pushes arrive only via `connection-notify`, and the plugin matches them by id. Keep `connection-eval` out of the live path.
-2. Edits: observe through a chained `keyboard-press` plus idle polling of a cheap fingerprint of the buffer. Use `buffer-notify` only after it is tested.
-3. Timers: chained `delayed (:pause …)` with `:idle` for debounce. Do not use `:every` with a plain body.
-4. Serialisation: use `serialize-texmacs` only if the round trip with `mls FILE` passes. Otherwise keep save-then-read (M3 protocol).
-5. Panel: rebuild on each view, as M3 does, until measured.
+Evidence: `q5-b7kyu895/{probe.log,serialized.tm,inspect.json}`.
+`(serialize-texmacs (buffer-get URL))` serialized the **whole buffer**, including its header/style,
+in **1 ms** for this fixture (617 characters). It already supplied blank lines after `<TeXmacs|…>`
+and before `<\body>`; no manual separator repair was necessary.
+An `UNSAVED-PROBE` insertion appeared in the serialized snapshot and not in the disk copy;
+byte comparison confirmed that the original fixture copy stayed unchanged.
+`target/debug/mls serialized.tm` returned **5 blocks, 0 diagnostics**: all four existing UUIDs
+survived, plus the new uncarried commentary. This establishes a path to unsaved-buffer snapshots;
+new blocks still need stable carrier assignment before relying on their identities across revisions.
 
-## Remaining work (in order)
+## Q6. Panel rebuilding — executed, synchronous cost only
 
-1. Fix the Q4 scenario script. The stage-2 `cond` in `scratchpad/m4-research-tm/scm/e4-scen.scm` lost a parenthesis when the `write` clause was patched, so the `slow`, `command_frame`, `scheme_frame`, `unicode` and `write` runs logged nothing. Rebuild it and rerun those cases.
-2. Q1: attach a notifier to a loaded `.tm` copy, make `(insert ...)` edits, and count `buffer-notify` calls and `notify-cursor-moved` calls. Measure `change-time` after an edit.
-3. Q2: `tree-innermost` with a carrier predicate on a fixture copy.
-4. Q5: `serialize-texmacs` on the fixture, write it to a scratch `.tm` with the canonical layout, run `mls FILE` on it.
-5. Q6: time one panel rebuild.
-6. Final doc: at most 200 lines, a "Recommended M4 client design" section, and the GUI-only list (below).
+Evidence: `q6-t7big36h/probe.log`, using the existing `mls-render-view` implementation.
+One sample each: **4 rows: 24 ms; 100 rows: 27 ms; 1000 rows: 80 ms**.
+The resulting panel bodies had 6, 102, and 1002 children respectively (two heading/badge rows).
+These timings include Scheme tree construction, buffer replacement, and switching; they exclude
+subsequent Qt painting and are not a benchmark distribution. Coalesce view updates; do not rebuild
+on every edit or cursor notification. Whole-panel replacement remains a reasonable initial implementation.
 
-## GUI-only, not verified
+## Recommended M4 client design
 
-- Whether the real GUI (not Qt offscreen) delivers `connection-notify` pushes at the same cadence.
-- Keyboard and menu hooks in the real GUI, shortcut conflicts, hover balloons, footer messages, and menu label refresh.
-- Behaviour of the user's patched `~/.my-texmacs` tree (its `keyboard-press`, `notify-*` and `init-texmacs.scm` changes).
-- Whether `idle-time` resets on mouse movement in the real GUI.
+1. Register a persistent plugin connection with no banner. Use `connection-write-string` for
+   newline-delimited, versioned requests; attach document UUID, client revision, and request ID.
+2. Consume replies/pushes exclusively through a chained `connection-notify` handler. Accept only
+   the expected document/concat/text structure, recover ASCII JSON, and validate its schema/identity.
+   Keep raw UTF-8, `command:`, and `scheme:` out of daemon output; never evaluate JSON-derived text.
+3. Chain `buffer-notify`, `keyboard-press`, and `notify-cursor-moved` with `former`; attach a notifier
+   per document. Mark dirty and increment a client revision cheaply, then debounce/coalesce on a chained timer. Suppress feedback
+   from the client's own status-buffer writes and verify the target buffer on every delayed callback.
+4. Derive active block with inclusive `tree-innermost`; cursor departure plus idle debounce gates work.
+   Serialize the whole unsaved buffer when needed, preserve/assign carriers, and reject stale replies.
+5. Rebuild the panel only when a new accepted view arrives. Keep the current editing buffer/cursor
+   owned by the user; M3's `mls-render-view` switches buffers, so live rendering must preserve focus.
+6. Define explicit shutdown/cancellation/reconnect and bounded queues. Do not infer graceful daemon
+   cleanup from `connection-stop`; add a tested shutdown acknowledgement before relying on it.
+
+## GUI-only checks, not verified
+
+- Actual keyboard, paste, undo/redo, menu and mouse edit coverage; real keystroke latency and shortcut conflicts.
+- Mouse effects on `idle-time`, focus changes, cursor movement and block departure while typing.
+- Real-window push cadence, redraw/scroll latency, hover balloons, footer messages and menu-label refresh.
+- Focus/cursor/selection preservation during panel updates and interactions with other installed plugins.
+- Review/edit-dialog rendering, text entry, and actual confirm/reject/edit button callbacks.
+
+Other limits: the owner's patched tree and hook compatibility remain intentionally uninspected.
+Graceful EOF/shutdown, daemon-death recovery, and large-document soak/backpressure tests could
+be performed offscreen but were not established by this investigation.
