@@ -67,6 +67,19 @@ report does not expose it. Reported token totals and separate counts of calls
 with missing input/output-token usage are retained; missing counters in older
 reports remain unknown.
 
+Every nonaccepted mapped case also has one deterministic failure `category`, with
+all five `category_counts` present (including zeros) under
+`failures.taxonomy_version = "mls-m2-failure-categories-v1"`. Priority is explicit
+SIR contract/rejection evidence (`sir_wrong`), a hard structure-scoped mismatch
+(`structure_check_mismatch`), Lean name resolution
+(`unknown_or_wrong_mathlib_name`), a Lean typing diagnostic (`type_error`), then
+`other`. Name-resolution diagnostics do not prove which Mathlib name was intended.
+Transport, truncation, admission syntax and blocked dependencies remain `other`
+unless more specific evidence exists. Classification uses the final attempt's
+report, not all intermediate repair failures. Exact reference-SIR inequality and
+a missing SIR never establish that a SIR is wrong; semantic faithfulness requires
+independent review. Counts sum to `failures.count`; accepted drafts are excluded.
+
 Run the stdlib-only tests without making model calls:
 
 ```sh

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const EXTRACT_PREFIX: &str = "MLS_EXTRACT:";
 const VALIDATE_PREFIX: &str = "MLS_VALIDATE:";
+const VALIDATE_PROOF_PREFIX: &str = "MLS_VALIDATE_PROOF:";
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// One generated declaration submitted for checking.
@@ -248,6 +249,27 @@ impl LeanWorker {
         &mut self,
         request: StatementRequest<'_>,
     ) -> Result<CheckResult, WorkerError> {
+        self.check_declaration(request, false)
+    }
+
+    /// Check one complete theorem proof using the proof-specific admission path. This permits
+    /// tactic syntax in the theorem body while retaining one-declaration and blocked-syntax
+    /// checks; statement formalization continues to require the exact `by sorry` placeholder.
+    pub fn check_proof(
+        &mut self,
+        request: StatementRequest<'_>,
+    ) -> Result<CheckResult, WorkerError> {
+        if request.source.contains("--") || request.source.contains("/-") {
+            return Err(payload_error("proof validation", "comments are forbidden"));
+        }
+        self.check_declaration(request, true)
+    }
+
+    fn check_declaration(
+        &mut self,
+        request: StatementRequest<'_>,
+        proof: bool,
+    ) -> Result<CheckResult, WorkerError> {
         self.ensure_ready()?;
         if request.source.contains('\0') {
             return Err(payload_error("validation", "NUL bytes are forbidden"));
@@ -255,14 +277,30 @@ impl LeanWorker {
         if !valid_declaration_name(request.declaration_name) {
             return Err(WorkerError::InvalidDeclarationName);
         }
+        let validator = if proof {
+            "#mls_validate_proof_source"
+        } else {
+            "#mls_validate_source"
+        };
         let validation_response = self.request(&json!({
             "env": self.accepted_environment,
-            "cmd": format!("#mls_validate_source {} from_source {}", request.declaration_name, lean_string(request.source)),
+            "cmd": format!("{validator} {} from_source {}", request.declaration_name, lean_string(request.source)),
         }))?;
         let validation_messages = messages(&validation_response)?;
         reject_errors(validation_messages.clone())?;
-        let validation: Validation =
-            unique_payload(&validation_messages, VALIDATE_PREFIX, "validation")?;
+        let validation: Validation = unique_payload(
+            &validation_messages,
+            if proof {
+                VALIDATE_PROOF_PREFIX
+            } else {
+                VALIDATE_PREFIX
+            },
+            if proof {
+                "proof validation"
+            } else {
+                "validation"
+            },
+        )?;
         if validation.declaration != request.declaration_name {
             return Err(payload_error(
                 "validation",

@@ -16,16 +16,21 @@ use std::collections::{BTreeSet, HashMap};
 
 pub mod decisions;
 pub mod live;
-pub mod retrieval;
+pub mod proof;
 pub mod review;
 
-pub use review::{
-    BlockView, CachedLean, REVIEW_SCHEMA_VERSION, ReviewEntry, ReviewError, ReviewStore,
-    ReviewView, VIEW_PROTOCOL, formal_block, lacks_persisted_ids, review_view,
+pub use proof::{
+    ConfirmedStatement, LeanProofCheck, LeanRefutationCheck, ModelProofGenerator, ProofCandidate,
+    ProofChecker, ProofConfig, ProofDiagnostic, ProofGenerator, ProofReport, ProofState,
+    ProofStatus, StatementProofChecker, prove,
 };
 
-const SIR_SCHEMA_VERSION: &str = "mls-sir-v1";
-const LEAN_SCHEMA_VERSION: &str = "mls-lean-statement-v1";
+pub use review::{
+    BlockView, CachedLean, ProofStatusCounts, REVIEW_SCHEMA_VERSION, ReviewEntry, ReviewError,
+    ReviewStore, ReviewView, VIEW_PROTOCOL, formal_block, lacks_persisted_ids, review_view,
+};
+
+pub(crate) const FORMALIZATION_SCHEMA_VERSION: &str = "mls-formalization-v1";
 
 /// System prompt for SIR generation. The schema is fixed; this text states its field contract.
 const SIR_INSTRUCTIONS: &str = "Extract only the claim stated in the source. Return the strict SIR. assumptions_made is mandatory and lists every silent choice, with unchanged meaning. Preserve the source kind and label exactly. Do not infer expected formal content from tests or metadata. \
@@ -37,20 +42,17 @@ conclusion is, for a theorem, the claimed proposition; for a definition, the def
 /// Runtime bounds for a batch.
 #[derive(Clone, Copy, Debug)]
 pub struct PipelineConfig {
-    /// Total Lean generation attempts per statement, including the initial attempt.
+    /// Total combined formalization attempts per statement, including the initial attempt.
     pub max_attempts: u32,
-    /// Maximum tokens for each SIR response.
-    pub sir_max_tokens: u32,
-    /// Maximum tokens for each Lean response.
-    pub lean_max_tokens: u32,
+    /// Maximum tokens for each combined SIR and Lean response.
+    pub formalization_max_tokens: u32,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             max_attempts: 3,
-            sir_max_tokens: 2_048,
-            lean_max_tokens: 2_048,
+            formalization_max_tokens: 4_096,
         }
     }
 }
@@ -189,6 +191,9 @@ pub struct BlockReport {
     pub errors: Vec<String>,
     /// Structured Lean errors retained with their original positions.
     pub lean_diagnostics: Vec<LeanDiagnostic>,
+    /// Proof result for the exact human-confirmed statement, when proof search was run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<proof::ProofReport>,
 }
 
 /// A Lean error associated with the source block being formalized.
@@ -247,6 +252,17 @@ pub trait StatementChecker {
         name: &str,
         source: &str,
     ) -> Result<ExtractedDeclaration, String>;
+    /// Check a complete proof declaration. Implementations backed by Lean should use Lean's
+    /// proof-specific admission path, which permits tactic bodies without weakening statement
+    /// admission. The default preserves lightweight checker compatibility in offline fixtures.
+    fn check_proof(
+        &mut self,
+        block_id: BlockId,
+        name: &str,
+        source: &str,
+    ) -> Result<ExtractedDeclaration, String> {
+        self.check(block_id, name, source)
+    }
     /// Accept or discard the most recent candidate after mechanical checks.
     fn finish(&mut self, accept: bool) -> Result<(), String>;
     /// Return structured diagnostics from the most recent failed check.
@@ -285,6 +301,38 @@ impl StatementChecker for LeanStatementChecker<'_> {
         let checked = self
             .worker
             .check_statement(StatementRequest {
+                block_id,
+                declaration_name: name,
+                source,
+            })
+            .map_err(|error| {
+                if let WorkerError::Diagnostics(diagnostics) = &error {
+                    self.diagnostics = diagnostics.clone();
+                    diagnostics
+                        .iter()
+                        .map(format_repl_diagnostic)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    error.to_string()
+                }
+            })?;
+        let extracted = checked.extracted.clone();
+        self.pending = Some(checked.candidate);
+        Ok(extracted)
+    }
+
+    fn check_proof(
+        &mut self,
+        block_id: BlockId,
+        name: &str,
+        source: &str,
+    ) -> Result<ExtractedDeclaration, String> {
+        self.pending = None;
+        self.diagnostics.clear();
+        let checked = self
+            .worker
+            .check_proof(StatementRequest {
                 block_id,
                 declaration_name: name,
                 source,
@@ -461,8 +509,6 @@ pub fn run_batch_reviewed(
                 cached_sir: None,
                 lean_lookup: &reusable,
                 reuse_generated_lean: false,
-                initial_premises: None,
-                repair_premises: None,
             },
         );
         if let Some(dependency) = output.accepted {
@@ -494,17 +540,12 @@ pub(crate) struct BlockInput<'a> {
     pub expected_uses: &'a [String],
     /// Human decisions in effect for the document.
     pub review: &'a ReviewStore,
-    /// A reusable SIR for this block. It is ignored when the block has a rejected SIR.
+    /// A generated SIR cached under this block's text and dependency hashes.
     pub cached_sir: Option<&'a Sir>,
     /// Looks up an accepted declaration for a section 4 cache key.
     pub lean_lookup: &'a dyn Fn(&str) -> Option<String>,
-    /// Whether a declaration found for a generated SIR may be reused. Confirmed SIRs always may.
+    /// Reuse a cached generated SIR only when its paired Lean artifact also exists.
     pub reuse_generated_lean: bool,
-    /// Already-rendered top-10 Mathlib premises for initial Lean generation, if available.
-    /// This is prompt context only; it never affects SIR generation, checks or cache keys.
-    pub initial_premises: Option<&'a str>,
-    /// Already-rendered top-20 Mathlib premises for every Lean repair attempt, if available.
-    pub repair_premises: Option<&'a str>,
 }
 
 /// The result of formalizing one block.
@@ -550,105 +591,228 @@ pub(crate) fn formalize_block(
             sir_cacheable: false,
         };
     };
-    let dependency_sirs: Vec<Sir> = input
-        .dependencies
-        .iter()
-        .map(|dependency| dependency.sir.clone())
-        .collect();
-    let context = SirContext {
-        block,
-        canonical,
-        review: input.review,
-        dependencies: &dependency_sirs,
-        max_tokens: config.sir_max_tokens,
-        cached: input.cached_sir,
+    let entry = input.review.entry(id);
+    report.previously_rejected = matches!(entry, Some(ReviewEntry::Rejected { .. }));
+    let pinned = match entry {
+        Some(ReviewEntry::Confirmed {
+            sir,
+            text_hash,
+            edited,
+            ..
+        }) if *text_hash == block.text_hash => Some((
+            sir.clone(),
+            if *edited {
+                SirOrigin::Edited
+            } else {
+                SirOrigin::Confirmed
+            },
+        )),
+        _ => None,
     };
-    let Some(decision) = decide_sir(models, &context, usage, &mut report) else {
-        return BlockOutput {
-            report,
-            accepted: None,
-            sir_cacheable: false,
-        };
+    let confirmed_previous = match entry {
+        Some(ReviewEntry::Confirmed { sir, .. }) => Some(sir),
+        _ => None,
     };
-    let SirDecision {
-        sir,
-        origin,
-        cacheable,
-    } = decision;
-    report.sir_origin = Some(origin.as_str().into());
-    report.sir_hash = Some(sir.semantic_hash());
-    report.sir = Some(sir.clone());
-    let identity = validate_sir_identity(block, &sir, input.expected_uses);
-    if !identity.is_empty() {
-        report.errors.extend(identity);
-        return BlockOutput {
-            report,
-            accepted: None,
-            sir_cacheable: false,
-        };
-    }
     let dependency_hashes: Vec<(BlockId, String)> = input
         .dependencies
         .iter()
         .map(|dependency| (dependency.id, dependency.sir.semantic_hash()))
         .collect();
-    let cache_key = cache_key_from_hashes(&sir.semantic_hash(), &dependency_hashes);
-    report.cache_key = Some(cache_key.clone());
     let declaration_name = declaration_name(id);
-    // A declaration is reused only after Lean re-checks it against this SIR.
-    let reusable = if origin.is_human_confirmed() || input.reuse_generated_lean {
-        (input.lean_lookup)(&cache_key)
-    } else {
-        None
-    };
-    let cached = reusable.and_then(|declaration| {
-        check_cached_declaration(checker, id, &declaration_name, &sir, &declaration)
-    });
     let mut accepted = None;
-    if let Some((declaration, checks)) = cached {
-        report.lean_origin = Some("cache".into());
-        report.elaborated = true;
-        report.complete_structure = is_complete(&checks);
-        report.checks = checks;
-        report.accepted_speculatively = true;
-        report.lean_statement = Some(declaration.clone());
-        accepted = Some(AcceptedDependency {
-            id,
-            name: declaration_name,
-            declaration,
-            sir: sir.clone(),
-        });
-    } else {
-        let dependency_refs: Vec<&AcceptedDependency> = input.dependencies.iter().collect();
-        let mut feedback = Vec::new();
+    let mut feedback = Vec::new();
+    let mut previous_output: Option<Value> = None;
+    let mut has_usable_sir = false;
+    let mut origin = pinned
+        .as_ref()
+        .map_or(SirOrigin::Generated, |(_, origin)| *origin);
+    let mut cacheable = false;
+    let source_text = match std::str::from_utf8(canonical) {
+        Ok(text) => text,
+        Err(_) => {
+            report
+                .errors
+                .push("block source is not valid UTF-8; it was not sent to a model".into());
+            return BlockOutput {
+                report,
+                accepted: None,
+                sir_cacheable: false,
+            };
+        }
+    };
+    let dependency_refs: Vec<&AcceptedDependency> = input.dependencies.iter().collect();
+    // An unchanged confirmed SIR may reuse its exact reviewed artifact. Changed text always goes
+    // through the joint call so the candidate SIR and declaration are produced together.
+    if let Some((sir, _)) = &pinned {
+        let key = cache_key_from_hashes(&sir.semantic_hash(), &dependency_hashes);
+        if let Some(declaration) = (input.lean_lookup)(&key)
+            && let Some((declaration, checks)) =
+                check_cached_declaration(checker, id, &declaration_name, sir, &declaration)
+        {
+            report.sir = Some(sir.clone());
+            report.sir_hash = Some(sir.semantic_hash());
+            report.cache_key = Some(key);
+            report.sir_origin = Some(origin.as_str().into());
+            report.lean_origin = Some("cache".into());
+            report.elaborated = true;
+            report.complete_structure = is_complete(&checks);
+            report.checks = checks;
+            report.accepted_speculatively = true;
+            report.lean_statement = Some(declaration.clone());
+            accepted = Some(AcceptedDependency {
+                id,
+                name: declaration_name.clone(),
+                declaration,
+                sir: sir.clone(),
+            });
+            has_usable_sir = true;
+        }
+    }
+    if accepted.is_none()
+        && pinned.is_none()
+        && input.reuse_generated_lean
+        && let Some(sir) = input.cached_sir
+        && validate_sir_identity(block, sir, input.expected_uses).is_empty()
+    {
+        let key = cache_key_from_hashes(&sir.semantic_hash(), &dependency_hashes);
+        if let Some(declaration) = (input.lean_lookup)(&key)
+            && let Some((declaration, checks)) =
+                check_cached_declaration(checker, id, &declaration_name, sir, &declaration)
+        {
+            report.sir = Some(sir.clone());
+            report.sir_hash = Some(sir.semantic_hash());
+            report.cache_key = Some(key);
+            report.sir_origin = Some(SirOrigin::Generated.as_str().into());
+            report.lean_origin = Some("cache".into());
+            report.elaborated = true;
+            report.complete_structure = is_complete(&checks);
+            report.checks = checks;
+            report.accepted_speculatively = true;
+            report.lean_statement = Some(declaration.clone());
+            accepted = Some(AcceptedDependency {
+                id,
+                name: declaration_name.clone(),
+                declaration,
+                sir: sir.clone(),
+            });
+            has_usable_sir = true;
+        }
+    }
+    if accepted.is_none() {
         for attempt in 0..config.max_attempts.max(1) {
             report.attempts += 1;
-            report.lean_statement = None;
             report.elaborated = false;
             report.checks.clear();
             report.lean_diagnostics.clear();
-            match generate_lean(
+            match generate_formalization(
                 models,
-                LeanGeneration {
+                FormalizationGeneration {
                     block,
-                    sir: &sir,
-                    name: &declaration_name,
+                    text: source_text,
+                    dependencies: &dependency_refs,
                     attempt,
                     feedback: &feedback,
-                    dependencies: &dependency_refs,
-                    max_tokens: config.lean_max_tokens,
-                    premises: if attempt == 0 {
-                        input.initial_premises
-                    } else {
-                        input.repair_premises
+                    previous_output: previous_output.as_ref(),
+                    rejected: match entry {
+                        Some(ReviewEntry::Rejected { sir, .. }) => Some(sir),
+                        _ => None,
                     },
+                    review_sir: pinned.as_ref().map(|(sir, _)| sir).or(confirmed_previous),
+                    name: &declaration_name,
+                    max_tokens: config.formalization_max_tokens,
                 },
                 usage,
             ) {
                 Err(error) => feedback = vec![error.to_string()],
-                Ok(candidate) => {
-                    report.lean_statement = Some(candidate.clone());
-                    match checker.check(id, &declaration_name, &candidate) {
+                Ok((candidate_sir, candidate_lean, output)) => {
+                    previous_output = Some(output);
+                    report.cosmetic_reconfirmation = pinned.is_none()
+                        && confirmed_previous.is_some_and(|confirmed| {
+                            candidate_sir.semantic_hash() == confirmed.semantic_hash()
+                        });
+                    let returned_identity =
+                        validate_sir_identity(block, &candidate_sir, input.expected_uses);
+                    let differs_from_pinned = pinned
+                        .as_ref()
+                        .is_some_and(|(pinned_sir, _)| candidate_sir != *pinned_sir);
+                    if !returned_identity.is_empty() || differs_from_pinned {
+                        let (sir, sir_origin) = pinned.as_ref().map_or_else(
+                            || (candidate_sir.clone(), SirOrigin::Generated),
+                            |(sir, origin)| (sir.clone(), *origin),
+                        );
+                        report.sir = Some(sir.clone());
+                        report.sir_hash = Some(sir.semantic_hash());
+                        report.sir_origin = Some(sir_origin.as_str().into());
+                        feedback = if returned_identity.is_empty() {
+                            vec!["the returned SIR differs from the unchanged confirmed SIR".into()]
+                        } else {
+                            returned_identity
+                        };
+                        continue;
+                    }
+                    let (sir, candidate_origin) = if let Some((pinned_sir, pinned_origin)) = &pinned
+                    {
+                        (pinned_sir.clone(), *pinned_origin)
+                    } else if let Some(confirmed) = confirmed_previous {
+                        if candidate_sir.semantic_hash() == confirmed.semantic_hash() {
+                            report.cosmetic_reconfirmation = true;
+                            (confirmed.clone(), SirOrigin::Confirmed)
+                        } else {
+                            let changed: Vec<_> = confirmed
+                                .diff(&candidate_sir)
+                                .changes
+                                .iter()
+                                .map(|change| change.field)
+                                .collect();
+                            report.superseded_confirmation =
+                                Some(format!("changed fields: {}", changed.join(", ")));
+                            (candidate_sir.clone(), SirOrigin::Generated)
+                        }
+                    } else {
+                        (candidate_sir.clone(), SirOrigin::Generated)
+                    };
+                    if let Some(ReviewEntry::Rejected { sir: rejected, .. }) = entry
+                        && rejected.semantic_hash() == candidate_sir.semantic_hash()
+                    {
+                        feedback = vec!["the regenerated SIR equals the rejected SIR".into()];
+                        break;
+                    }
+                    has_usable_sir = true;
+                    let key = cache_key_from_hashes(&sir.semantic_hash(), &dependency_hashes);
+                    report.sir = Some(sir.clone());
+                    report.sir_hash = Some(sir.semantic_hash());
+                    report.cache_key = Some(key.clone());
+                    report.sir_origin = Some(candidate_origin.as_str().into());
+                    origin = candidate_origin;
+                    cacheable = matches!(candidate_origin, SirOrigin::Generated)
+                        && !report.cosmetic_reconfirmation;
+                    if report.cosmetic_reconfirmation
+                        && let Some(declaration) = (input.lean_lookup)(&key)
+                        && let Some((declaration, checks)) = check_cached_declaration(
+                            checker,
+                            id,
+                            &declaration_name,
+                            &sir,
+                            &declaration,
+                        )
+                    {
+                        report.lean_statement = Some(declaration.clone());
+                        report.lean_origin = Some("cache".into());
+                        report.elaborated = true;
+                        report.complete_structure = is_complete(&checks);
+                        report.checks = checks;
+                        report.accepted_speculatively = true;
+                        accepted = Some(AcceptedDependency {
+                            id,
+                            name: declaration_name.clone(),
+                            declaration,
+                            sir: sir.clone(),
+                        });
+                        feedback.clear();
+                        break;
+                    }
+                    report.lean_statement = Some(candidate_lean.clone());
+                    match checker.check(id, &declaration_name, &candidate_lean) {
                         Err(error) => {
                             report.lean_diagnostics = checker
                                 .take_diagnostics()
@@ -668,33 +832,34 @@ pub(crate) fn formalize_block(
                         Ok(extracted) => {
                             report.elaborated = true;
                             report.checks = compare_structure(&sir, &declaration_name, &extracted);
-                            let hard_mismatch = report
+                            let mismatch = report
                                 .checks
                                 .iter()
                                 .any(|c| c.hard && c.state == CheckState::Mismatch);
-                            if let Err(error) = checker.finish(!hard_mismatch) {
+                            if let Err(error) = checker.finish(!mismatch) {
                                 feedback = vec![error];
                                 continue;
                             }
-                            if !hard_mismatch {
-                                report.accepted_speculatively = true;
-                                report.lean_origin = Some("generated".into());
-                                report.complete_structure = is_complete(&report.checks);
-                                accepted = Some(AcceptedDependency {
-                                    id,
-                                    name: declaration_name.clone(),
-                                    declaration: candidate,
-                                    sir: sir.clone(),
-                                });
-                                feedback.clear();
-                                break;
+                            if mismatch {
+                                feedback = report
+                                    .checks
+                                    .iter()
+                                    .filter(|c| c.state == CheckState::Mismatch)
+                                    .map(|c| format!("{}: {}", c.field, c.detail))
+                                    .collect();
+                                continue;
                             }
-                            feedback = report
-                                .checks
-                                .iter()
-                                .filter(|c| c.state == CheckState::Mismatch)
-                                .map(|c| format!("{}: {}", c.field, c.detail))
-                                .collect();
+                            report.accepted_speculatively = true;
+                            report.lean_origin = Some("generated".into());
+                            report.complete_structure = is_complete(&report.checks);
+                            accepted = Some(AcceptedDependency {
+                                id,
+                                name: declaration_name.clone(),
+                                declaration: candidate_lean,
+                                sir: sir.clone(),
+                            });
+                            feedback.clear();
+                            break;
                         }
                     }
                 }
@@ -702,10 +867,14 @@ pub(crate) fn formalize_block(
         }
         report.errors.extend(feedback);
     }
-    report.status = match (report.accepted_speculatively, origin.is_human_confirmed()) {
-        (true, true) => BlockStatus::StatementConfirmed,
-        (true, false) => BlockStatus::SirDrafted,
-        (false, _) => BlockStatus::FormalizationError,
+    report.status = if !has_usable_sir {
+        BlockStatus::NotFormalized
+    } else {
+        match (report.accepted_speculatively, origin.is_human_confirmed()) {
+            (true, true) => BlockStatus::StatementConfirmed,
+            (true, false) => BlockStatus::SirDrafted,
+            (false, _) => BlockStatus::FormalizationError,
+        }
     };
     BlockOutput {
         report,
@@ -759,6 +928,7 @@ fn empty_report(block: &Block) -> BlockReport {
         attempts: 0,
         errors: Vec::new(),
         lean_diagnostics: Vec::new(),
+        proof: None,
     }
 }
 
@@ -811,52 +981,9 @@ fn source_kind(kind: BlockKind) -> Option<StatementKind> {
         BlockKind::Lemma => Some(StatementKind::Lemma),
         BlockKind::Proposition => Some(StatementKind::Proposition),
         BlockKind::Corollary => Some(StatementKind::Corollary),
+        BlockKind::ProseClaim => Some(StatementKind::Theorem),
         _ => None,
     }
-}
-
-fn generate_sir(
-    models: &mut impl ModelClient,
-    block: &Block,
-    text: &str,
-    dependencies: &[Sir],
-    rejected: Option<&Sir>,
-    max_tokens: u32,
-    usage: &mut UsageSummary,
-) -> Result<Sir, ModelError> {
-    let mut user_content = format!(
-        "SOURCE:\n{text}\n\nDEPENDENCY SIRS:\n{}",
-        serde_json::to_string(dependencies).expect("SIR serialization cannot fail")
-    );
-    if let Some(rejected) = rejected {
-        user_content.push_str(&format!(
-            "\n\nREVIEW NOTE: a reviewer rejected the previous SIR for this source. Return a corrected SIR; do not repeat the rejected one.\nREJECTED SIR:\n{}",
-            serde_json::to_string(rejected).expect("SIR serialization cannot fail")
-        ));
-    }
-    let request = GenerationRequest {
-        context: CallContext {
-            block_id: block.id.to_string(),
-            attempt: 0,
-        },
-        stage: GenerationStage::Sir,
-        messages: vec![
-            ChatMessage {
-                role: "system".into(),
-                content: SIR_INSTRUCTIONS.into(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: user_content,
-            },
-        ],
-        schema_version: SIR_SCHEMA_VERSION.into(),
-        schema: sir_schema(),
-        max_tokens,
-    };
-    let reply = generate_accounted(models, &request, usage)?;
-    let sir = serde_json::from_value(reply.output).map_err(ModelError::Json)?;
-    Ok(sir)
 }
 
 /// Where the SIR in effect for a block came from.
@@ -866,7 +993,6 @@ enum SirOrigin {
     Confirmed,
     Edited,
 }
-
 impl SirOrigin {
     const fn as_str(self) -> &'static str {
         match self {
@@ -875,128 +1001,145 @@ impl SirOrigin {
             Self::Edited => "edited",
         }
     }
-
     const fn is_human_confirmed(self) -> bool {
         !matches!(self, Self::Generated)
     }
 }
 
-/// Inputs for choosing the SIR of one block.
-struct SirContext<'a> {
+struct FormalizationGeneration<'a> {
     block: &'a Block,
-    /// Layout-independent block text sent to the model; see `Analysis::canonical_text`.
-    canonical: &'a [u8],
-    review: &'a ReviewStore,
-    dependencies: &'a [Sir],
+    text: &'a str,
+    dependencies: &'a [&'a AcceptedDependency],
+    attempt: u32,
+    feedback: &'a [String],
+    previous_output: Option<&'a Value>,
+    rejected: Option<&'a Sir>,
+    review_sir: Option<&'a Sir>,
+    name: &'a str,
     max_tokens: u32,
-    /// A SIR generated earlier for the same inputs. Used instead of a model call, unless the
-    /// block has a rejected SIR, which must be regenerated with its note.
-    cached: Option<&'a Sir>,
 }
 
-/// The SIR chosen for a block and how it was obtained.
-struct SirDecision {
-    sir: Sir,
-    origin: SirOrigin,
-    /// The SIR came from a model call that was not conditioned on a rejection, so it may be cached.
-    cacheable: bool,
-}
-
-/// Choose the SIR in effect for a block. A confirmed or edited SIR whose block text is unchanged
-/// is used without a model call. Otherwise a SIR is generated, and a rejected SIR is given to the
-/// model as a note. Returns `None` when the block has no usable SIR; the reason is in the report.
-fn decide_sir(
+fn generate_formalization(
     models: &mut impl ModelClient,
-    context: &SirContext<'_>,
+    generation: FormalizationGeneration<'_>,
     usage: &mut UsageSummary,
-    report: &mut BlockReport,
-) -> Option<SirDecision> {
-    let block = context.block;
-    let entry = context.review.entry(block.id);
-    report.previously_rejected = matches!(entry, Some(ReviewEntry::Rejected { .. }));
-    if let Some(ReviewEntry::Confirmed {
-        sir,
-        text_hash,
-        edited,
-        ..
-    }) = entry
-        && *text_hash == block.text_hash
+) -> Result<(Sir, String, Value), ModelError> {
+    let FormalizationGeneration {
+        block,
+        text,
+        dependencies,
+        attempt,
+        feedback,
+        previous_output,
+        rejected,
+        review_sir,
+        name,
+        max_tokens,
+    } = generation;
+    let kind = if review_sir.is_some_and(|sir| sir.kind() == StatementKind::Definition)
+        || block.kind == BlockKind::Definition
     {
-        let origin = if *edited {
-            SirOrigin::Edited
-        } else {
-            SirOrigin::Confirmed
-        };
-        return Some(SirDecision {
-            sir: sir.clone(),
-            origin,
-            cacheable: false,
-        });
+        "definition"
+    } else {
+        "theorem"
+    };
+    let dependency_context = dependencies
+        .iter()
+        .map(|d| json!({"name":d.name,"declaration":d.declaration,"sir":d.sir}))
+        .collect::<Vec<_>>();
+    let mut user = format!(
+        "SOURCE:\n{text}\n\nACCEPTED DEPENDENCIES (declarations and SIRs):\n{}",
+        serde_json::to_string(&dependency_context).expect("dependency serialization")
+    );
+    if let Some(sir) = review_sir {
+        user.push_str(&format!(
+            "\n\nCONFIRMED SIR (preserve unless source meaning changed):\n{}",
+            serde_json::to_string(sir).expect("SIR serialization")
+        ));
     }
-    let Ok(text) = std::str::from_utf8(context.canonical) else {
-        report
-            .errors
-            .push("block source is not valid UTF-8; it was not sent to a model".into());
-        return None;
-    };
-    let rejected = match entry {
-        Some(ReviewEntry::Rejected { sir, .. }) => Some(sir),
-        _ => None,
-    };
-    let (generated, from_model) = match (rejected, context.cached) {
-        (None, Some(cached)) => (cached.clone(), false),
-        _ => match generate_sir(
-            models,
-            block,
-            text,
-            context.dependencies,
-            rejected,
-            context.max_tokens,
-            usage,
-        ) {
-            Ok(sir) => (sir, true),
-            Err(error) => {
-                report.errors.push(error.to_string());
-                return None;
-            }
+    if let Some(sir) = rejected {
+        user.push_str(&format!(
+            "\n\nREJECTED SIR (do not repeat):\n{}",
+            serde_json::to_string(sir).expect("SIR serialization")
+        ));
+    }
+    if let Some(output) = previous_output {
+        user.push_str(&format!(
+            "\n\nFULL PREVIOUS COMBINED OUTPUT:\n{}",
+            serde_json::to_string_pretty(output).expect("JSON serialization")
+        ));
+    }
+    if !feedback.is_empty() {
+        user.push_str(&format!(
+            "\n\nEXACT REPAIR FEEDBACK:\n{}",
+            feedback.join("\n")
+        ));
+    }
+    let system = format!(
+        "{SIR_INSTRUCTIONS} Return exactly {{sir, lean_statement, lean_proof, notes}}. lean_statement is one {kind} named {name}; explicit binders follow SIR variable order then hypothesis order. No extra commands, options, imports, opens, attributes, or comments. Use fully qualified Mathlib names. Imported Mathlib is available; use actual Lean diagnostics and name resolution to repair names. Do not claim search tools are unavailable or automatically run. Theorem body is exactly `:= by sorry`; definitions have a pure body and no sorry. lean_proof is null and notes is an array of strings."
+    );
+    let request = GenerationRequest {
+        context: CallContext {
+            block_id: block.id.to_string(),
+            attempt,
         },
+        stage: if attempt == 0 {
+            GenerationStage::Formalization
+        } else {
+            GenerationStage::FormalizationRepair
+        },
+        messages: vec![
+            ChatMessage {
+                role: "system".into(),
+                content: system,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: user,
+            },
+        ],
+        schema_version: FORMALIZATION_SCHEMA_VERSION.into(),
+        schema: formalization_schema(),
+        max_tokens,
     };
-    let cacheable = from_model && rejected.is_none();
-    if let Some(previous) = rejected
-        && previous.semantic_hash() == generated.semantic_hash()
-    {
-        report
-            .errors
-            .push("the regenerated SIR equals the rejected SIR".into());
-        return None;
+    let reply = generate_accounted(models, &request, usage)?;
+    let output = reply.output;
+    let object = output.as_object().ok_or_else(|| {
+        ModelError::InvalidResponse("formalization output must be an object".into())
+    })?;
+    let required = ["sir", "lean_statement", "lean_proof", "notes"];
+    if object.len() != required.len() || required.iter().any(|field| !object.contains_key(*field)) {
+        return Err(ModelError::InvalidResponse(
+            "formalization output must contain exactly sir, lean_statement, lean_proof, and notes"
+                .into(),
+        ));
     }
-    if let Some(ReviewEntry::Confirmed {
-        sir: confirmed,
-        sir_hash,
-        ..
-    }) = entry
-    {
-        if generated.semantic_hash() == *sir_hash {
-            report.cosmetic_reconfirmation = true;
-            return Some(SirDecision {
-                sir: confirmed.clone(),
-                origin: SirOrigin::Confirmed,
-                cacheable,
-            });
-        }
-        let changed: Vec<_> = confirmed
-            .diff(&generated)
-            .changes
-            .iter()
-            .map(|change| change.field)
-            .collect();
-        report.superseded_confirmation = Some(format!("changed fields: {}", changed.join(", ")));
+    if !object["lean_proof"].is_null() {
+        return Err(ModelError::InvalidResponse(
+            "M2/M4 formalization must return lean_proof: null".into(),
+        ));
     }
-    Some(SirDecision {
-        sir: generated,
-        origin: SirOrigin::Generated,
-        cacheable,
-    })
+    if !object["notes"]
+        .as_array()
+        .is_some_and(|notes| notes.iter().all(Value::is_string))
+    {
+        return Err(ModelError::InvalidResponse(
+            "notes must be an array of strings".into(),
+        ));
+    }
+    let sir = serde_json::from_value(
+        output
+            .get("sir")
+            .cloned()
+            .ok_or_else(|| ModelError::InvalidResponse("sir is missing".into()))?,
+    )
+    .map_err(ModelError::Json)?;
+    let lean = output
+        .get("lean_statement")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ModelError::InvalidResponse("lean_statement is missing".into()))?
+        .to_owned();
+    Ok((sir, lean, output))
 }
 
 /// The section 4 cache key from a block's SIR hash and the `(id, SIR hash)` pairs of its formal
@@ -1036,109 +1179,6 @@ fn is_complete(checks: &[StructureCheck]) -> bool {
         .any(|check| check.scope == CheckScope::Structure && check.state == CheckState::Unchecked)
 }
 
-struct LeanGeneration<'a> {
-    block: &'a Block,
-    sir: &'a Sir,
-    name: &'a str,
-    attempt: u32,
-    feedback: &'a [String],
-    dependencies: &'a [&'a AcceptedDependency],
-    max_tokens: u32,
-    premises: Option<&'a str>,
-}
-
-fn generate_lean(
-    models: &mut impl ModelClient,
-    generation: LeanGeneration<'_>,
-    usage: &mut UsageSummary,
-) -> Result<String, ModelError> {
-    let LeanGeneration {
-        block,
-        sir,
-        name,
-        attempt,
-        feedback,
-        dependencies,
-        max_tokens,
-        premises,
-    } = generation;
-    let kind = if sir.kind() == StatementKind::Definition {
-        "definition"
-    } else {
-        "theorem"
-    };
-    let variables = sir
-        .variables()
-        .iter()
-        .map(|v| v.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let hypothesis_names = (0..sir.hypotheses().len())
-        .map(|i| format!("h{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let body_rule = if kind == "definition" {
-        "A definition must have its actual pure body and must not contain sorry."
-    } else {
-        "A theorem body must be exactly `:= by sorry`; do not provide a proof."
-    };
-    let dependency_context = dependencies
-        .iter()
-        .map(|dependency| {
-            json!({
-                "name": dependency.name,
-                "declaration": dependency.declaration,
-                "sir": dependency.sir,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut user_content = format!(
-        "SIR:\n{}\n\nACCEPTED DEPENDENCIES (generated name, declaration, SIR):\n{}\n\nPREVIOUS ERRORS:\n{}",
-        serde_json::to_string_pretty(sir).expect("SIR serialization cannot fail"),
-        serde_json::to_string(&dependency_context).expect("dependency serialization cannot fail"),
-        feedback.join("\n")
-    );
-    if let Some(premises) = premises.filter(|text| !text.trim().is_empty()) {
-        user_content.push_str("\n\nRETRIEVED MATHLIB PREMISES:\n");
-        user_content.push_str(premises);
-        user_content.push_str("\nEND RETRIEVED MATHLIB PREMISES");
-    }
-    let request = GenerationRequest {
-        context: CallContext {
-            block_id: block.id.to_string(),
-            attempt,
-        },
-        stage: if attempt == 0 {
-            GenerationStage::LeanStatement
-        } else {
-            GenerationStage::LeanRepair
-        },
-        messages: vec![
-            ChatMessage {
-                role: "system".into(),
-                content: format!(
-                    "Return one Lean {kind} in lean_statement. Its name must be {name}. Use set_option autoImplicit false semantics. Header binders are all explicit, in this order: one binder per SIR variable [{variables}], named as in the SIR and in order, then one hypothesis binder per SIR hypothesis, named [{hypothesis_names}] and in order. Preserve every valid SIR variable name; do not add implicit or extra binders. Never introduce a hypothesis whose type is True or otherwise vacuous. If a SIR item cannot be formalized faithfully, still write the faithful statement and explain the gap in notes; do not pad the binders to match a count. lean_statement must contain exactly one `theorem` or `def` declaration and nothing else: no `set_option`, `open`, `variable`, `namespace`, `import`, attributes, comments or additional commands. Use fully qualified names (for example `Filter.atTop` or `Set.Icc`) instead of `open`. {body_rule} lean_proof must be null."
-                ),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: user_content,
-            },
-        ],
-        schema_version: LEAN_SCHEMA_VERSION.into(),
-        schema: lean_schema(),
-        max_tokens,
-    };
-    let reply = generate_accounted(models, &request, usage)?;
-    let source = reply
-        .output
-        .get("lean_statement")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| ModelError::InvalidResponse("lean_statement is missing".into()))?;
-    Ok(source)
-}
-
 /// The admission contract that the trusted Lean checker enforces on every candidate.
 const ADMISSION_CONTRACT: &str = "Admission contract: lean_statement must be exactly one declaration, a theorem body must be exactly `by sorry`, and it must contain no other commands, options, attributes, comments, opens or imports, using only supported pure term syntax.";
 
@@ -1160,7 +1200,7 @@ fn admission_hint(error: &str) -> Option<String> {
     })
 }
 
-fn generate_accounted(
+pub(crate) fn generate_accounted(
     models: &mut impl ModelClient,
     request: &GenerationRequest,
     usage: &mut UsageSummary,
@@ -1838,7 +1878,9 @@ fn heads_equal(expected: &str, actual: &str) -> bool {
     )
 }
 
-fn declaration_name(id: BlockId) -> String {
+/// Stable Lean declaration name used by the pipeline and incremental environment replay.
+#[must_use]
+pub fn declaration_name(id: BlockId) -> String {
     format!("mls_{}", id.to_string().replace('-', "_"))
 }
 
@@ -1847,10 +1889,10 @@ fn declaration_name(id: BlockId) -> String {
 pub fn sir_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"required":["kind","label","variables","hypotheses","conclusion","uses","assumptions_made"],"properties":{"kind":{"enum":["definition","theorem","lemma","proposition","corollary"]},"label":{"type":["string","null"]},"variables":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string"},"type":{"type":"string"}}}},"hypotheses":{"type":"array","items":{"type":"string"}},"conclusion":{"type":"string"},"uses":{"type":"array","items":{"type":"string"}},"assumptions_made":{"type":"array","items":{"type":"string"}}}})
 }
-/// Strict JSON schema sent for Lean statement generation.
+/// Strict schema for one combined SIR and Lean statement output.
 #[must_use]
-pub fn lean_schema() -> Value {
-    json!({"type":"object","additionalProperties":false,"required":["lean_statement","lean_proof","mathlib_names_used","notes"],"properties":{"lean_statement":{"type":"string"},"lean_proof":{"type":"null"},"mathlib_names_used":{"type":"array","items":{"type":"string"}},"notes":{"type":"array","items":{"type":"string"}}}})
+pub fn formalization_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["sir","lean_statement","lean_proof","notes"],"properties":{"sir":sir_schema(),"lean_statement":{"type":"string"},"lean_proof":{"type":"null"},"notes":{"type":"array","items":{"type":"string"}}}})
 }
 
 #[cfg(test)]
@@ -1914,170 +1956,67 @@ mod tests {
         }
     }
 
-    struct PremisePromptModel {
-        replies: std::collections::VecDeque<GenerationReply>,
-        requests: Vec<GenerationRequest>,
-    }
-
-    impl ModelClient for PremisePromptModel {
-        fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
-            self.requests.push(request.clone());
-            Ok(self.replies.pop_front().expect("recorded scripted reply"))
-        }
-
-        fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
-            panic!("retrieved premises must not introduce decision calls")
+    fn test_metadata() -> mls_models::CallMetadata {
+        mls_models::CallMetadata {
+            http_status: 200,
+            configured_model: "test".into(),
+            resolved_model: "test".into(),
+            request_id: None,
+            provider: None,
+            latency_ms: 0,
+            usage: Usage::default(),
+            provider_response: json!({}),
         }
     }
 
-    struct PremisePromptChecker {
-        calls: usize,
-        finishes: Vec<bool>,
-    }
-
-    impl StatementChecker for PremisePromptChecker {
-        fn check(&mut self, id: BlockId, _: &str, _: &str) -> Result<ExtractedDeclaration, String> {
-            self.calls += 1;
-            if self.calls == 1 {
-                return Err("unknown identifier `MissingName`".into());
-            }
-            let mut value = extracted(Vec::new(), "True");
-            value.declaration = declaration_name(id);
-            Ok(value)
-        }
-
-        fn finish(&mut self, accept: bool) -> Result<(), String> {
-            self.finishes.push(accept);
-            Ok(())
-        }
-    }
-
-    fn premise_prompt_recordings() -> Vec<Value> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/recordings/pipeline/repair");
-        (0..3)
-            .map(|number| {
-                serde_json::from_slice(
-                    &std::fs::read(root.join(format!("call-{number:04}.json"))).unwrap(),
-                )
-                .unwrap()
-            })
-            .collect()
-    }
-
-    fn run_premise_prompt_fixture(
-        initial_premises: Option<&str>,
-        repair_premises: Option<&str>,
-    ) -> (BlockOutput, Vec<GenerationRequest>, UsageSummary, Vec<bool>) {
-        let source = include_bytes!("../../../tests/fixtures/lean/pipeline/repair.tm");
-        let analysis = analyze(&parse(source).unwrap());
-        let block = &analysis.blocks[0];
-        let mut model = PremisePromptModel {
-            replies: premise_prompt_recordings()
-                .into_iter()
-                .map(|record| serde_json::from_value(record["response"].clone()).unwrap())
-                .collect(),
-            requests: Vec::new(),
-        };
-        let mut checker = PremisePromptChecker {
-            calls: 0,
-            finishes: Vec::new(),
-        };
-        let mut usage = UsageSummary::default();
-        let review = ReviewStore::new();
-        let lookup = |_: &str| None;
-        let output = formalize_block(
-            &mut model,
-            &mut checker,
-            PipelineConfig {
-                max_attempts: 2,
-                sir_max_tokens: 4096,
-                lean_max_tokens: 4096,
-            },
-            &mut usage,
-            BlockInput {
-                block,
-                canonical: analysis.canonical_text(block.id),
-                failed_dependency: false,
+    fn test_generation(
+        model: &mut OneReply,
+        usage: &mut UsageSummary,
+    ) -> Result<(Sir, String, Value), ModelError> {
+        generate_formalization(
+            model,
+            FormalizationGeneration {
+                block: &test_block(),
+                text: "x",
                 dependencies: &[],
-                expected_uses: &[],
-                review: &review,
-                cached_sir: None,
-                lean_lookup: &lookup,
-                reuse_generated_lean: false,
-                initial_premises,
-                repair_premises,
+                attempt: 0,
+                feedback: &[],
+                previous_output: None,
+                rejected: None,
+                review_sir: None,
+                name: "mls_test",
+                max_tokens: 10,
             },
-        );
-        assert!(model.replies.is_empty());
-        (output, model.requests, usage, checker.finishes)
+            usage,
+        )
     }
 
     #[test]
-    fn absent_premises_keep_every_recorded_generation_request_byte_identical() {
-        let (_, requests, _, _) = run_premise_prompt_fixture(None, None);
-        for (actual, record) in requests.iter().zip(premise_prompt_recordings()) {
-            let mut expected = record["request"].clone();
-            for field in ["endpoint", "model", "provider", "response_format"] {
-                expected.as_object_mut().unwrap().remove(field);
-            }
-            let expected: GenerationRequest = serde_json::from_value(expected).unwrap();
-            assert_eq!(
-                serde_json::to_vec(actual).unwrap(),
-                serde_json::to_vec(&expected).unwrap()
-            );
-        }
-        let (_, empty, _, _) = run_premise_prompt_fixture(Some(""), Some(" \n\t"));
+    fn formalization_output_schema_is_joint_strict_and_notes_are_strings() {
+        let schema = formalization_schema();
         assert_eq!(
-            serde_json::to_vec(&requests).unwrap(),
-            serde_json::to_vec(&empty).unwrap()
+            schema["required"],
+            json!(["sir", "lean_statement", "lean_proof", "notes"])
         );
-    }
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"]["sir"]["properties"]["assumptions_made"].is_object());
+        assert!(schema["properties"]["notes"]["items"]["type"] == "string");
+        assert!(schema["properties"].get("mathlib_names_used").is_none());
 
-    #[test]
-    fn retrieved_premises_only_augment_the_selected_lean_prompt_and_keep_drafts_unconfirmed() {
-        let (baseline, baseline_requests, baseline_usage, baseline_finishes) =
-            run_premise_prompt_fixture(None, None);
-        let (output, requests, usage, finishes) = run_premise_prompt_fixture(
-            Some("INITIAL_TOP_10 : True\nFirst initial doc sentence."),
-            Some("REPAIR_TOP_20 : Nat\nFirst repair doc sentence."),
-        );
-        assert_eq!(requests.len(), 3);
-        assert_eq!(requests[0].stage, GenerationStage::Sir);
-        assert_eq!(requests[1].stage, GenerationStage::LeanStatement);
-        assert_eq!(requests[2].stage, GenerationStage::LeanRepair);
-        assert_eq!(
-            serde_json::to_vec(&requests[0]).unwrap(),
-            serde_json::to_vec(&baseline_requests[0]).unwrap(),
-            "SIR generation receives no retrieved premises"
-        );
-        for (number, text) in [
-            (1, "INITIAL_TOP_10 : True\nFirst initial doc sentence."),
-            (2, "REPAIR_TOP_20 : Nat\nFirst repair doc sentence."),
+        let base_sir = json!({"kind":"theorem","label":"thm:test","variables":[],"hypotheses":[],"conclusion":"True","uses":[],"assumptions_made":[]});
+        for output in [
+            json!({"sir":base_sir,"lean_statement":"theorem mls_test : True := by sorry","lean_proof":null,"notes":[1]}),
+            json!({"sir":base_sir,"lean_statement":"theorem mls_test : True := by sorry","lean_proof":"by rfl","notes":[]}),
+            json!({"sir":base_sir,"lean_statement":"theorem mls_test : True := by sorry","lean_proof":null,"notes":[],"mathlib_names_used":[]}),
         ] {
-            let mut expected = baseline_requests[number].clone();
-            expected.messages[1].content.push_str(&format!(
-                "\n\nRETRIEVED MATHLIB PREMISES:\n{text}\nEND RETRIEVED MATHLIB PREMISES"
-            ));
-            assert_eq!(
-                serde_json::to_vec(&requests[number]).unwrap(),
-                serde_json::to_vec(&expected).unwrap(),
-                "only the selected Lean user message is augmented"
-            );
+            let reply = GenerationReply {
+                output,
+                metadata: test_metadata(),
+                finish_reason: "stop".into(),
+            };
+            let mut model = OneReply(Some(Ok(reply)));
+            assert!(test_generation(&mut model, &mut UsageSummary::default()).is_err());
         }
-        assert_eq!(output.report.status, BlockStatus::SirDrafted);
-        assert!(output.report.accepted_speculatively);
-        assert_eq!(output.report.attempts, 2);
-        assert_eq!(
-            serde_json::to_value(output.report).unwrap(),
-            serde_json::to_value(baseline.report).unwrap(),
-            "premises cannot change structural evidence, cache keys or status"
-        );
-        assert_eq!(finishes, baseline_finishes);
-        assert_eq!(
-            serde_json::to_value(usage).unwrap(),
-            serde_json::to_value(baseline_usage).unwrap()
-        );
     }
 
     #[test]
@@ -2103,7 +2042,7 @@ mod tests {
         };
         let mut model = OneReply(Some(Ok(reply)));
         let mut usage = UsageSummary::default();
-        assert!(generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage).is_err());
+        assert!(test_generation(&mut model, &mut usage).is_err());
         assert_eq!(usage.calls, 1);
         assert_eq!(usage.input_tokens, 7);
         assert_eq!(usage.unknown_output_token_calls, 1);
@@ -2128,7 +2067,7 @@ mod tests {
         };
         let mut model = OneReply(Some(Err(error)));
         let mut usage = UsageSummary::default();
-        assert!(generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage).is_err());
+        assert!(test_generation(&mut model, &mut usage).is_err());
         assert_eq!(usage.calls, 1);
         assert_eq!(usage.output_tokens, 9);
         assert_eq!(usage.unknown_input_token_calls, 1);
@@ -2690,7 +2629,7 @@ mod tests {
     fn replay_mismatch_is_not_counted_as_a_provider_call() {
         let mut model = OneReply(Some(Err(ModelError::ReplayMismatch)));
         let mut usage = UsageSummary::default();
-        let error = generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage);
+        let error = test_generation(&mut model, &mut usage);
         assert!(matches!(error, Err(ModelError::ReplayMismatch)));
         assert_eq!(usage.calls, 0);
     }
@@ -2699,7 +2638,7 @@ mod tests {
     fn recording_stopped_is_not_counted_as_a_provider_call() {
         let mut model = OneReply(Some(Err(ModelError::RecordingStopped)));
         let mut usage = UsageSummary::default();
-        let error = generate_sir(&mut model, &test_block(), "x", &[], None, 10, &mut usage);
+        let error = test_generation(&mut model, &mut usage);
         assert!(matches!(error, Err(ModelError::RecordingStopped)));
         assert_eq!(usage.calls, 0);
         assert_eq!(usage.unknown_output_token_calls, 0);

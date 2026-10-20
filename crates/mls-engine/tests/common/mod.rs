@@ -5,8 +5,8 @@ use mls_core::BlockId;
 use mls_engine::{PipelineConfig, StatementChecker};
 use mls_lean::{ExtractedDeclaration, Position, ReplDiagnostic, Severity};
 use mls_models::{
-    CallMetadata, DecisionReply, DecisionRequest, GenerationReply, GenerationRequest,
-    GenerationStage, ModelClient, ModelError, Usage,
+    CallMetadata, DecisionReply, DecisionRequest, GenerationReply, GenerationRequest, ModelClient,
+    ModelError, Usage,
 };
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -22,8 +22,7 @@ pub fn fixture_root() -> PathBuf {
 pub fn config() -> PipelineConfig {
     PipelineConfig {
         max_attempts: 2,
-        sir_max_tokens: 4096,
-        lean_max_tokens: 4096,
+        formalization_max_tokens: 4096,
     }
 }
 
@@ -99,14 +98,46 @@ pub fn extracted(id: u8, goal_outer_head: &str) -> ExtractedDeclaration {
 pub struct CapturingClient {
     pub replies: VecDeque<Result<GenerationReply, ModelError>>,
     pub requests: Vec<GenerationRequest>,
+    pub last_sir: Option<Value>,
 }
 
 impl ModelClient for CapturingClient {
     fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
         self.requests.push(request.clone());
-        self.replies
+        let mut reply = self
+            .replies
             .pop_front()
-            .expect("missing synthetic response")
+            .expect("missing synthetic response")?;
+        // Keep existing scenario fixtures readable while the request boundary is unified: legacy
+        // SIR + Lean fixture pairs are folded into the single recorded combined response.
+        if reply.output.get("sir").is_none() && reply.output.get("kind").is_some() {
+            let sir = reply.output.clone();
+            self.last_sir = Some(sir.clone());
+            let lean = if self.replies.front().is_some_and(|reply| {
+                reply
+                    .as_ref()
+                    .is_ok_and(|candidate| candidate.output.get("lean_statement").is_some())
+            }) {
+                self.replies
+                    .pop_front()
+                    .expect("peeked response exists")?
+                    .output
+            } else {
+                json!({"lean_statement":"theorem placeholder : True := by sorry","notes":[]})
+            };
+            let statement = lean
+                .get("lean_statement")
+                .cloned()
+                .unwrap_or(json!("theorem placeholder : True := by sorry"));
+            let notes = lean.get("notes").cloned().unwrap_or(json!([]));
+            reply.output =
+                json!({"sir":sir,"lean_statement":statement,"lean_proof":null,"notes":notes});
+        } else if reply.output.get("sir").is_none() && reply.output.get("lean_statement").is_some()
+        {
+            let lean = reply.output.clone();
+            reply.output = json!({"sir":self.last_sir.clone().unwrap_or(json!({"kind":"theorem","label":null,"variables":[],"hypotheses":[],"conclusion":"placeholder","uses":[],"assumptions_made":[]})),"lean_statement":lean["lean_statement"],"lean_proof":null,"notes":lean.get("notes").cloned().unwrap_or(json!([]))});
+        }
+        Ok(reply)
     }
 
     fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
@@ -135,7 +166,6 @@ pub fn lean(statement: &str) -> GenerationReply {
         json!({
             "lean_statement": statement,
             "lean_proof": null,
-            "mathlib_names_used": [],
             "notes": []
         }),
     )
@@ -198,9 +228,6 @@ pub struct OracleClient {
 
 impl ModelClient for OracleClient {
     fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
-        if request.stage != GenerationStage::Sir {
-            return Ok(lean("theorem placeholder : True := by sorry"));
-        }
         let second = request.context.block_id.ends_with("000000000002");
         let index = usize::from(second);
         let uses: Vec<&str> = if second && self.labels[0] == "thm:first" {
@@ -211,7 +238,7 @@ impl ModelClient for OracleClient {
         let seed = if second { 2 } else { 1 };
         Ok(reply(
             seed,
-            json!({
+            json!({"sir": {
                 "kind": "theorem",
                 "label": self.labels[index],
                 "variables": [],
@@ -219,7 +246,7 @@ impl ModelClient for OracleClient {
                 "conclusion": format!("claim {}", self.semantics[index]),
                 "uses": uses,
                 "assumptions_made": []
-            }),
+            }, "lean_statement":"theorem placeholder : True := by sorry", "lean_proof":null, "notes": []}),
         ))
     }
 

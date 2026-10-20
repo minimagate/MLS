@@ -9,8 +9,8 @@ use mls_engine::{
 };
 use mls_lean::{Binder, ExtractedDeclaration, LeanWorker, Position, ReplConfig};
 use mls_models::{
-    DecisionReply, DecisionRequest, GenerationReply, GenerationRequest, ModelClient, ModelError,
-    RecordingClient, ReplayClient,
+    DecisionReply, DecisionRequest, GenerationReply, GenerationRequest, GenerationStage,
+    ModelClient, ModelError, RecordingClient, ReplayClient,
 };
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -52,10 +52,10 @@ fn replay_success_has_deterministic_draft_report() {
             && block.attempts == 1
     }));
     assert_eq!(checker.finishes, [true, true]);
-    assert_eq!(report.usage.calls, 4);
-    assert_eq!(report.usage.input_tokens, 40);
-    assert_eq!(report.usage.output_tokens, 20);
-    assert_eq!(report.usage.known_cost, 0.04);
+    assert_eq!(report.usage.calls, 2);
+    assert_eq!(report.usage.input_tokens, 20);
+    assert_eq!(report.usage.output_tokens, 10);
+    assert_eq!(report.usage.known_cost, 0.02);
     assert_eq!(report.usage.unknown_cost_calls, 0);
     let actual = serde_json::to_value(&report).unwrap();
     let expected: Value = serde_json::from_slice(
@@ -85,6 +85,54 @@ fn replay_repair_uses_feedback_and_keeps_the_draft_unconfirmed() {
 }
 
 #[test]
+fn structure_mismatch_repair_can_replace_sir_and_lean_together() {
+    let sir_output = |conclusion: &str| {
+        json!({
+            "sir": {
+                "kind": "theorem",
+                "label": "thm:repair",
+                "variables": [],
+                "hypotheses": [],
+                "conclusion": conclusion,
+                "uses": [],
+                "assumptions_made": []
+            },
+            "lean_statement": "theorem mls_00000000_0000_4000_8000_000000000003 : False := by sorry",
+            "lean_proof": null,
+            "notes": []
+        })
+    };
+    let mut models = CapturingClient {
+        replies: VecDeque::from([
+            Ok(reply(3, sir_output("0 = 0"))),
+            Ok(reply(4, sir_output("False"))),
+        ]),
+        requests: Vec::new(),
+        last_sir: None,
+    };
+    let mut actual = extracted(3, "False");
+    actual.goal = "False".into();
+    let mut checker = ScriptedChecker::new([
+        CheckStep::Extracted(actual.clone()),
+        CheckStep::Extracted(actual),
+    ]);
+    let report = run_batch(&source("repair"), &mut models, &mut checker, config()).unwrap();
+
+    let block = &report.blocks[0];
+    assert!(block.accepted_speculatively);
+    assert_eq!(block.attempts, 2);
+    assert_eq!(block.sir.as_ref().unwrap().conclusion(), "False");
+    assert_eq!(models.requests.len(), 2);
+    assert_eq!(
+        models.requests[1].stage,
+        GenerationStage::FormalizationRepair
+    );
+    let repair = &models.requests[1].messages[1].content;
+    assert!(repair.contains("FULL PREVIOUS COMBINED OUTPUT"));
+    assert!(repair.contains("goal.outer_head: expected equality, got False"));
+}
+
+#[test]
 fn admission_rejection_repair_prompt_carries_the_original_message_and_contract_hint() {
     let original = "Lean: line 1, column 0: invalid MLS declaration source: <mls-declaration>:3:0: expected end of input";
     let mut models = CapturingClient {
@@ -98,6 +146,7 @@ fn admission_rejection_repair_prompt_carries_the_original_message_and_contract_h
             )),
         ]),
         requests: Vec::new(),
+        last_sir: None,
     };
     let mut checker = ScriptedChecker::new([
         CheckStep::Error(original),
@@ -106,8 +155,8 @@ fn admission_rejection_repair_prompt_carries_the_original_message_and_contract_h
     let report = run_batch(&source("repair"), &mut models, &mut checker, config()).unwrap();
 
     assert!(report.blocks[0].accepted_speculatively);
-    assert_eq!(models.requests.len(), 3);
-    let prompt = models.requests[2].messages[1].content.as_str();
+    assert_eq!(models.requests.len(), 2);
+    let prompt = models.requests[1].messages[1].content.as_str();
     assert!(prompt.contains(original));
     assert!(prompt.contains("Admission contract: lean_statement must be exactly one declaration"));
     assert!(prompt.contains("theorem body must be exactly `by sorry`"));
@@ -145,7 +194,7 @@ fn hard_mismatch_exhausts_attempts_and_blocks_dependent_without_model_calls() {
         dependent.errors,
         ["a formal statement dependency was not accepted speculatively"]
     );
-    assert_eq!(report.usage.calls, 3);
+    assert_eq!(report.usage.calls, 2);
 }
 
 #[test]
@@ -154,12 +203,12 @@ fn recorded_hard_errors_are_bounded_by_max_attempts() {
     let mut checker = ScriptedChecker::new([]);
     let report = run_batch(&source("exhaustion"), &mut models, &mut checker, config()).unwrap();
     let block = &report.blocks[0];
-    assert_eq!(block.status, BlockStatus::FormalizationError);
+    assert_eq!(block.status, BlockStatus::NotFormalized);
     assert_eq!(block.attempts, 2);
     assert!(!block.elaborated);
     assert!(!block.accepted_speculatively);
     assert_eq!(block.errors, ["transport error: synthetic outage 2"]);
-    assert_eq!(report.usage.calls, 3);
+    assert_eq!(report.usage.calls, 2);
     assert_eq!(report.usage.unknown_input_token_calls, 2);
     assert_eq!(report.usage.unknown_output_token_calls, 2);
     assert_eq!(report.usage.unknown_cost_calls, 2);
@@ -171,7 +220,7 @@ fn replay_rejects_even_a_small_prompt_contract_change() {
     let mut models = replay("success");
     let mut checker = ScriptedChecker::new([]);
     let mut changed = config();
-    changed.sir_max_tokens = 4095;
+    changed.formalization_max_tokens = 4095;
     let report = run_batch(&source("success"), &mut models, &mut checker, changed).unwrap();
     assert_eq!(report.blocks[0].status, BlockStatus::NotFormalized);
     assert_eq!(
@@ -198,6 +247,7 @@ fn complete_structure_requires_a_recognized_matched_outer_head() {
                 )),
             ]),
             requests: Vec::new(),
+            last_sir: None,
         };
         let mut checker = ScriptedChecker::new([CheckStep::Extracted(extracted(3, "eq"))]);
         let report = run_batch(&source("repair"), &mut models, &mut checker, config()).unwrap();
@@ -258,7 +308,7 @@ fn replay_dependency_prompt_contains_generated_name_declaration_and_sir() {
     );
 
     let recorded: Value = serde_json::from_slice(
-        &std::fs::read(fixture_root().join("recordings/pipeline/dependency/call-0003.json"))
+        &std::fs::read(fixture_root().join("recordings/pipeline/dependency/call-0001.json"))
             .unwrap(),
     )
     .unwrap();
@@ -283,6 +333,7 @@ fn elaboration_failure_after_mismatch_leaves_no_stale_evidence() {
             )),
         ]),
         requests: Vec::new(),
+        last_sir: None,
     };
     let mut wrong = extracted(3, "False");
     wrong.goal = "False".into();
@@ -330,8 +381,8 @@ fn elaboration_failure_after_mismatch_leaves_no_stale_evidence() {
     assert_eq!(diagnostic.source_end, block.source_end);
     assert_eq!(checker.finishes, [false]);
 
-    assert_eq!(models.requests.len(), 3);
-    let repair_prompt = &models.requests[2].messages[1].content;
+    assert_eq!(models.requests.len(), 2);
+    let repair_prompt = &models.requests[1].messages[1].content;
     assert!(
         repair_prompt.contains("goal.outer_head: expected equality, got False"),
         "{repair_prompt}"
@@ -351,6 +402,7 @@ fn diagnostics_from_a_failed_attempt_do_not_survive_a_later_hard_mismatch() {
             )),
         ]),
         requests: Vec::new(),
+        last_sir: None,
     };
     let mut wrong = extracted(3, "False");
     wrong.goal = "False".into();
@@ -425,6 +477,7 @@ fn vacuous_hypothesis_padding_is_repaired_with_structured_feedback() {
             )),
         ]),
         requests: Vec::new(),
+        last_sir: None,
     };
     let binder = |type_text: &str| Binder {
         name: "h0".into(),
@@ -449,7 +502,7 @@ fn vacuous_hypothesis_padding_is_repaired_with_structured_feedback() {
     assert!(block.accepted_speculatively);
     assert!(block.errors.is_empty());
     assert_eq!(checker.finishes, [false, true]);
-    let repair_prompt = &models.requests[2].messages[1].content;
+    let repair_prompt = &models.requests[1].messages[1].content;
     assert!(
         repair_prompt.contains("hypotheses[0].vacuous: hypothesis is the vacuous proposition True"),
         "{repair_prompt}"
@@ -471,6 +524,7 @@ fn non_utf8_block_is_its_own_error_and_does_not_abort_the_batch() {
             )),
         ]),
         requests: Vec::new(),
+        last_sir: None,
     };
     let mut checker = ScriptedChecker::new([CheckStep::Extracted(extracted(1, "True"))]);
     let report = run_batch(&document, &mut models, &mut checker, config()).unwrap();
@@ -489,11 +543,11 @@ fn non_utf8_block_is_its_own_error_and_does_not_abort_the_batch() {
         ["block source is not valid UTF-8; it was not sent to a model"]
     );
     // Only the first block reached a model, and its accounting survives the second block.
-    assert_eq!(models.requests.len(), 2);
+    assert_eq!(models.requests.len(), 1);
     assert_eq!(checker.finishes, [true]);
-    assert_eq!(report.usage.calls, 2);
-    assert_eq!(report.usage.input_tokens, 20);
-    assert_eq!(report.usage.output_tokens, 10);
+    assert_eq!(report.usage.calls, 1);
+    assert_eq!(report.usage.input_tokens, 10);
+    assert_eq!(report.usage.output_tokens, 5);
 }
 
 fn spawn_real_worker() -> LeanWorker {
@@ -534,6 +588,7 @@ fn real_worker_repair_feedback_contains_lean_diagnostic_and_source_mapping() {
     let mut models = CapturingClient {
         replies,
         requests: Vec::new(),
+        last_sir: None,
     };
     let mut checker = LeanStatementChecker::new(&mut worker);
     let document = source("repair");
@@ -545,13 +600,18 @@ fn real_worker_repair_feedback_contains_lean_diagnostic_and_source_mapping() {
         &document[block.source_start..block.source_end],
         b"<\\theorem>Truth holds.<label|thm:repair></theorem>"
     );
-    let repair_prompt = &models.requests[2].messages[1].content;
+    assert_eq!(models.requests.len(), 2);
+    assert_eq!(
+        models.requests[1].stage,
+        GenerationStage::FormalizationRepair
+    );
+    let repair_prompt = &models.requests[1].messages[1].content;
     assert!(repair_prompt.contains("MissingName"), "{repair_prompt}");
     assert!(
         repair_prompt.contains("unknown identifier"),
         "{repair_prompt}"
     );
-    assert_eq!(models.requests[2].context.attempt, 1);
+    assert_eq!(models.requests[1].context.attempt, 1);
 }
 
 fn real_declaration(index: u8) -> (BlockId, String) {
@@ -680,7 +740,6 @@ fn update_synthetic_recordings() {
     write_recording(
         "exhaustion",
         vec![
-            Ok(sir(6, "theorem", "thm:exhaustion", vec![], "truth")),
             Err(ModelError::Transport("synthetic outage 1".into())),
             Err(ModelError::Transport("synthetic outage 2".into())),
         ],
@@ -738,6 +797,8 @@ fn update_synthetic_recordings() {
         [
             CheckStep::Extracted(definition),
             CheckStep::Extracted(theorem),
+            CheckStep::Extracted(extracted(8, "eq")),
+            CheckStep::Extracted(extracted(8, "eq")),
         ],
     );
 }
@@ -751,7 +812,10 @@ fn write_recording<const N: usize>(
     if directory.exists() {
         std::fs::remove_dir_all(&directory).unwrap();
     }
-    let client = QueueClient(replies.into());
+    let client = QueueClient {
+        replies: replies.into(),
+        last_sir: None,
+    };
     let mut recorder = RecordingClient::new(
         client,
         directory,
@@ -770,11 +834,41 @@ fn write_recording<const N: usize>(
     }
 }
 
-struct QueueClient(VecDeque<Result<GenerationReply, ModelError>>);
+struct QueueClient {
+    replies: VecDeque<Result<GenerationReply, ModelError>>,
+    last_sir: Option<Value>,
+}
 
 impl ModelClient for QueueClient {
     fn generate(&mut self, _: &GenerationRequest) -> Result<GenerationReply, ModelError> {
-        self.0.pop_front().expect("missing synthetic response")
+        let mut reply = self
+            .replies
+            .pop_front()
+            .expect("missing synthetic response")?;
+        if reply.output.get("sir").is_none() && reply.output.get("kind").is_some() {
+            let sir = reply.output.clone();
+            self.last_sir = Some(sir.clone());
+            let lean = if self.replies.front().is_some_and(|reply| {
+                reply
+                    .as_ref()
+                    .is_ok_and(|candidate| candidate.output.get("lean_statement").is_some())
+            }) {
+                self.replies.pop_front().expect("peeked response exists")?
+            } else {
+                reply.clone()
+            };
+            reply.output = serde_json::json!({
+                "sir": sir,
+                "lean_statement": lean.output.get("lean_statement").cloned().unwrap_or(serde_json::json!("theorem placeholder : True := by sorry")),
+                "lean_proof": null,
+                "notes": lean.output.get("notes").cloned().unwrap_or(serde_json::json!([]))
+            });
+        } else if reply.output.get("sir").is_none() && reply.output.get("lean_statement").is_some()
+        {
+            let lean = reply.output.clone();
+            reply.output = serde_json::json!({"sir":self.last_sir.clone().unwrap_or(Value::Null),"lean_statement":lean["lean_statement"],"lean_proof":null,"notes":[]});
+        }
+        Ok(reply)
     }
 
     fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {

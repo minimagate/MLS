@@ -4,8 +4,9 @@
 use super::cache::LeanCache;
 use super::scheduler::Job;
 use crate::{
-    AcceptedDependency, BlockInput, BlockReport, PipelineConfig, ReviewStore, StatementChecker,
-    UsageSummary, formalize_block,
+    AcceptedDependency, BlockInput, BlockReport, ConfirmedStatement, ModelProofGenerator,
+    PipelineConfig, ProofConfig, ReviewStore, StatementChecker, StatementProofChecker,
+    UsageSummary, formalize_block, prove,
 };
 use mls_core::{Block, BlockId};
 use mls_models::ModelClient;
@@ -28,6 +29,10 @@ pub struct Dependency {
 pub struct JobContext<'a> {
     /// The block to formalize.
     pub block: &'a Block,
+    /// Whether this job only generates a proof for the current accepted statement.
+    pub proof_only: bool,
+    /// The last applied report, retained for proof work and proof-result reuse.
+    pub current_report: Option<&'a BlockReport>,
     /// Canonical text of the block, or `None` when canonicalization failed.
     pub canonical: Option<&'a [u8]>,
     /// The labels the block's SIR must list in `uses`.
@@ -115,6 +120,28 @@ impl<'a, M, C> PipelineRunner<'a, M, C> {
 impl<M: ModelClient, C: StatementChecker> JobRunner for PipelineRunner<'_, M, C> {
     fn run(&mut self, job: &Job, context: &JobContext<'_>) -> JobOutcome {
         debug_assert_eq!(job.block, context.block.id);
+        if job.proof_only {
+            let Some(mut report) = context.current_report.cloned() else {
+                return JobOutcome::Failed {
+                    message: "proof job has no settled statement report".into(),
+                    usage: UsageSummary::default(),
+                };
+            };
+            let mut usage = UsageSummary::default();
+            run_confirmed_proof(
+                &mut report,
+                context,
+                &mut *self.models,
+                &mut *self.checker,
+                self.config,
+                &mut usage,
+            );
+            return JobOutcome::Completed(Box::new(JobResult {
+                report,
+                usage,
+                sir_cacheable: false,
+            }));
+        }
         let dependencies: Vec<AcceptedDependency> = context
             .dependencies
             .iter()
@@ -142,14 +169,95 @@ impl<M: ModelClient, C: StatementChecker> JobRunner for PipelineRunner<'_, M, C>
                 cached_sir: context.sir_candidate.as_ref(),
                 lean_lookup: &lookup,
                 reuse_generated_lean: true,
-                initial_premises: None,
-                repair_premises: None,
             },
         );
+        let mut report = output.report;
+        if report.proof.is_none()
+            && let Some(previous) = context.current_report.filter(|previous| {
+                previous.sir_hash == report.sir_hash
+                    && previous.cache_key == report.cache_key
+                    && previous.lean_statement == report.lean_statement
+                    && previous.proof.is_some()
+                    && matches!(
+                        context.review.entry(context.block.id),
+                        Some(crate::ReviewEntry::Confirmed {
+                            sir,
+                            sir_hash,
+                            text_hash,
+                            ..
+                        }) if Some(&sir.semantic_hash()) == report.sir_hash.as_ref()
+                            && Some(sir_hash) == report.sir_hash.as_ref()
+                            && text_hash == &context.block.text_hash
+                    )
+            })
+        {
+            report.proof = previous.proof.clone();
+        }
+        if report.proof.is_none() {
+            run_confirmed_proof(
+                &mut report,
+                context,
+                &mut *self.models,
+                &mut *self.checker,
+                self.config,
+                &mut usage,
+            );
+        }
         JobOutcome::Completed(Box::new(JobResult {
-            report: output.report,
+            report,
             usage,
             sir_cacheable: output.sir_cacheable,
         }))
     }
+}
+
+fn run_confirmed_proof<M: ModelClient, C: StatementChecker>(
+    report: &mut BlockReport,
+    context: &JobContext<'_>,
+    models: &mut M,
+    checker: &mut C,
+    config: PipelineConfig,
+    usage: &mut UsageSummary,
+) {
+    let (Some(sir), Some(sir_hash), Some(lean_statement)) =
+        (&report.sir, &report.sir_hash, &report.lean_statement)
+    else {
+        return;
+    };
+    if !report.accepted_speculatively
+        || sir.kind() == mls_sir::StatementKind::Definition
+        || !matches!(
+            context.review.entry(context.block.id),
+            Some(crate::ReviewEntry::Confirmed {
+                sir: confirmed_sir,
+                sir_hash: confirmed_hash,
+                text_hash,
+                ..
+            }) if confirmed_sir == sir
+                && confirmed_hash == sir_hash
+                && text_hash == &context.block.text_hash
+        )
+    {
+        return;
+    }
+    let Ok(target) = ConfirmedStatement::from_human_confirmation(
+        context.block.id,
+        crate::declaration_name(context.block.id),
+        lean_statement.clone(),
+        sir_hash.clone(),
+    ) else {
+        return;
+    };
+    let proof = {
+        let mut generator =
+            ModelProofGenerator::new(models, config.formalization_max_tokens, usage);
+        let mut checker = StatementProofChecker::new(checker);
+        prove(
+            &target,
+            &mut generator,
+            &mut checker,
+            ProofConfig::default(),
+        )
+    };
+    report.proof = Some(proof);
 }

@@ -147,6 +147,21 @@ impl Document {
         source: &[u8],
         links: &BTreeMap<BlockId, BlockId>,
     ) -> Result<ChangeSet, DocumentError> {
+        self.update_with_links_and_prose_claims(source, links, &BTreeSet::new())
+    }
+
+    /// Update with implicit links and Jev's confident claim classifications for untagged prose.
+    ///
+    /// Only persisted, currently untagged commentary IDs are eligible. All other IDs and kinds
+    /// are ignored, so a stale or malformed classification can never turn a tagged environment
+    /// into a different source kind. A prose claim participates in the same diff, graph,
+    /// dependency and scheduling rules as a theorem.
+    pub fn update_with_links_and_prose_claims(
+        &mut self,
+        source: &[u8],
+        links: &BTreeMap<BlockId, BlockId>,
+        prose_claims: &BTreeSet<BlockId>,
+    ) -> Result<ChangeSet, DocumentError> {
         let mut analysis = analyze(&parse(source)?);
         if analysis
             .diagnostics
@@ -157,6 +172,19 @@ impl Document {
         }
         if lacks_persisted_ids(&analysis) {
             return Err(DocumentError::MissingIds);
+        }
+        let transient_ids: BTreeSet<_> = analysis
+            .insertions
+            .iter()
+            .map(|insertion| insertion.id)
+            .collect();
+        for block in &mut analysis.blocks {
+            if block.kind == BlockKind::Commentary
+                && !transient_ids.contains(&block.id)
+                && prose_claims.contains(&block.id)
+            {
+                block.kind = BlockKind::ProseClaim;
+            }
         }
         let positions: HashMap<_, _> = analysis
             .blocks

@@ -39,6 +39,11 @@ private def blockedAtoms : List String :=
   ["run_tac", "eval%", "unsafeIO", "do", "unsafe", "partial",
     "implemented_by", "macro", "syntax", "elab", "deriving", "dbg_trace", "panic!"]
 
+/-- Search syntax that can launch an external request in the pinned Mathlib environment.
+These are proof-only because `firstBlockedProofSyntax?` runs only during proof admission. -/
+private def blockedProofExternalAtoms : List String :=
+  ["#loogle", "#leansearch", "#moogle", "#statesearch", "#search", "polyrith"]
+
 /-- Identifier components that can never appear in admitted source.  Each
 component of a dotted name is checked, so `Lean.ofReduceBool` is rejected through
 its `ofReduceBool` component.  A leading `@` is ignored.  Identifiers are otherwise
@@ -172,6 +177,20 @@ end
 private partial def containsAtom (stx : Syntax) (value : String) : Bool :=
   (stx.isAtom && stx.getAtomVal == value) || stx.getArgs.any (containsAtom · value)
 
+/-- Proof bodies may use Lean tactics outside the statement admission grammar, but they may not
+introduce blocked identifiers or effects. The declaration still has to parse as one theorem. -/
+private partial def firstBlockedProofSyntax? (stx : Syntax) : Option String :=
+  if stx.isAtom then
+    if blockedAtoms.contains stx.getAtomVal || blockedProofExternalAtoms.contains stx.getAtomVal then
+      some stx.getKind.toString
+    else none
+  else if stx.isIdent then
+    blockedIdentifier? stx.getId
+  else if stx.isMissing then
+    none
+  else
+    stx.getArgs.toList.findSome? firstBlockedProofSyntax?
+
 private partial def countKind (stx : Syntax) (kind : SyntaxNodeKind) : Nat :=
   (if stx.getKind == kind then 1 else 0) +
     (stx.getArgs.foldl (fun count child => count + countKind child kind) 0)
@@ -186,7 +205,8 @@ private def isExactSorryBody (value : Syntax) : Bool :=
   countKind value ``Lean.Parser.Tactic.tacticSorry == 1 &&
   containsAtom value "by" && containsAtom value "sorry"
 
-private def parseHeader (env : Environment) (source : String) (admission := false) : Except String ParsedHeader := do
+private def parseHeader (env : Environment) (source : String) (admission := false)
+    (proofAdmission := false) : Except String ParsedHeader := do
   let command ← Parser.runParserCategory env `command source "<mls-declaration>"
   unless command.getKind == ``Lean.Parser.Command.declaration do
     throw "expected exactly one theorem or def declaration"
@@ -210,16 +230,30 @@ private def parseHeader (env : Environment) (source : String) (admission := fals
   let mut count := 0
   for binder in binderNode.getArgs do
     count := count + (← binderCount binder)
-  if admission then
+  if proofAdmission then
+    unless kind == "theorem" do
+      throw "proof checking requires one theorem declaration"
+    let sig := decl.getArg sigIndex
+    if let some rejected := firstRejectedSyntax? sig then
+      throw s!"theorem statement contains unsupported syntax '{rejected}'"
+    if let some rejected := firstBlockedProofSyntax? command then
+      throw s!"proof declaration contains blocked syntax '{rejected}'"
+    let value := decl.getArg 3
+    unless value.getKind == ``Lean.Parser.Command.declValSimple &&
+        value.getNumArgs >= 2 && (value.getArg 1).getKind == ``Lean.Parser.Term.byTactic do
+      throw "proof must be a theorem with a tactic body"
+    unless countKind command ``Lean.Parser.Term.byTactic == 1 do
+      throw "tactics in a theorem signature are not supported"
+  else if admission then
     if let some rejected := firstRejectedSyntax? command then
       throw s!"declaration contains unsupported syntax '{rejected}'"
-  if admission && kind == "theorem" then
+  if admission && !proofAdmission && kind == "theorem" then
     let value := decl.getArg 3
     unless isExactSorryBody value do
       throw "theorem bodies must be the engine-injected 'by sorry' placeholder"
     unless countKind command ``Lean.Parser.Term.byTactic == 1 do
       throw "tactics in a theorem signature are not supported"
-  else if admission && (containsAtom decl "by" || containsAtom decl "sorry") then
+  else if admission && !proofAdmission && (containsAtom decl "by" || containsAtom decl "sorry") then
     -- The `sorry` keyword and `sorryAx` are both rejected: the keyword here, the
     -- constant by `blockedIdentifier?` in the walk above.
     throw "definition bodies cannot contain tactics or sorry"
@@ -313,6 +347,7 @@ private def extract (expectedName : Name) (source : String) : CommandElabM Json 
 
 syntax (name := mlsExtract) "#mls_extract " ident " from_source " str : command
 syntax (name := mlsValidateSource) "#mls_validate_source " ident " from_source " str : command
+syntax (name := mlsValidateProofSource) "#mls_validate_proof_source " ident " from_source " str : command
 
 elab_rules : command
   | `(#mls_validate_source $id:ident from_source $source:str) => do
@@ -326,6 +361,17 @@ elab_rules : command
         ("kind", toJson header.kind),
         ("binder_count", toJson header.binderCount)]
       logInfo m!"MLS_VALIDATE:{payload.compress}"
+  | `(#mls_validate_proof_source $id:ident from_source $source:str) => do
+      let header ← match parseHeader (← getEnv) source.getString (admission := true) (proofAdmission := true) with
+        | .ok header => pure header
+        | .error message => throwError "invalid MLS proof source: {message}"
+      unless header.name == id.getId do
+        throwError "source declares '{header.name}', but validation requested '{id.getId}'"
+      let payload := Json.mkObj [
+        ("declaration", toJson header.name.toString),
+        ("kind", toJson header.kind),
+        ("binder_count", toJson header.binderCount)]
+      logInfo m!"MLS_VALIDATE_PROOF:{payload.compress}"
   | `(#mls_extract $id:ident from_source $source:str) => do
       let payload ← extract id.getId source.getString
       logInfo m!"MLS_EXTRACT:{payload.compress}"

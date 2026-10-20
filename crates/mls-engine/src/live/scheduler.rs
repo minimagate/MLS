@@ -26,6 +26,8 @@ pub struct Job {
     pub(crate) generation: u64,
     /// The block to formalize.
     pub block: BlockId,
+    /// The job only generates/checks a proof for the already settled confirmed statement.
+    pub proof_only: bool,
     /// The document revision when the job was issued.
     pub revision: u64,
     /// The block's canonical text hash when the job was issued.

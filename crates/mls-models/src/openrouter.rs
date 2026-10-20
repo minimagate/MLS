@@ -1,20 +1,18 @@
 use crate::{
-    Answer, CallMetadata, ChoiceAnswer, DecisionReply, DecisionRequest, EmbeddingClient,
-    EmbeddingReply, EmbeddingRequest, GenerationReply, GenerationRequest, GenerationStage,
-    ModelClient, ModelConfig, ModelError, NoulAnswer, ProviderFailure, Question, Usage,
+    Answer, CallMetadata, ChoiceAnswer, DecisionReply, DecisionRequest, GenerationReply,
+    GenerationRequest, GenerationStage, ModelClient, ModelConfig, ModelError, NoulAnswer,
+    ProviderFailure, Question, Usage,
 };
 use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Instant};
 
-/// Blocking HTTPS OpenRouter client for generation, decisions, and embeddings.
+/// Blocking HTTPS OpenRouter client for generation and decisions.
 pub struct OpenRouterClient {
     config: ModelConfig,
     api_key: String,
     http: Client,
-    embedding_http: Client,
 }
 
 impl OpenRouterClient {
@@ -35,20 +33,10 @@ impl OpenRouterClient {
             ))
             .build()
             .map_err(|error| ModelError::Transport(error.to_string()))?;
-        // Keep the existing generation/decision redirect policy. Embedding batches must stay
-        // at the origin checked by the live gate, even when a loopback server redirects them.
-        let embedding_http = Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                config.request_timeout_seconds,
-            ))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| ModelError::Transport(error.to_string()))?;
         Ok(Self {
             config,
             api_key,
             http,
-            embedding_http,
         })
     }
 
@@ -61,12 +49,8 @@ impl OpenRouterClient {
 
     fn post(&self, path: &str, body: &Value) -> Result<(Response, u64), ModelError> {
         let started = Instant::now();
-        let http = if path == "/api/v1/embeddings" {
-            &self.embedding_http
-        } else {
-            &self.http
-        };
-        let result = http
+        let result = self
+            .http
             .post(format!(
                 "{}{}",
                 self.config.base_url.trim_end_matches('/'),
@@ -86,161 +70,6 @@ impl OpenRouterClient {
         let latency = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok((result, latency))
     }
-}
-
-impl EmbeddingClient for OpenRouterClient {
-    /// Remote embedding calls require explicit client construction and `MLS_LIVE=1`.
-    /// Loopback origins support offline transport tests without that environment flag.
-    fn embed(&mut self, request: &EmbeddingRequest) -> Result<EmbeddingReply, ModelError> {
-        validate_embedding_request(request)?;
-        if request.model != self.config.retrieval.embedding_model
-            || request.dimensions != self.config.retrieval.embedding_dimensions
-        {
-            return Err(ModelError::InvalidResponse(
-                "embedding request model or dimensions differ from retrieval configuration".into(),
-            ));
-        }
-        let loopback = reqwest::Url::parse(&self.config.base_url)
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]"));
-        if !loopback && std::env::var("MLS_LIVE").as_deref() != Ok("1") {
-            return Err(ModelError::InvalidResponse(
-                "remote embeddings require MLS_LIVE=1".into(),
-            ));
-        }
-        let body = json!({
-            "model": request.model,
-            "input": request.input,
-            "dimensions": request.dimensions,
-            "input_type": request.input_type,
-            "encoding_format": "float"
-        });
-        let (response, latency_ms) = self.post("/api/v1/embeddings", &body)?;
-        let raw = read_response(response, &self.api_key).map_err(bound_embedding_error)?;
-        let mut wire: EmbeddingsResponse = raw.parse().map_err(bound_embedding_error)?;
-        let usage: Usage = (&wire.usage).into();
-        let fail = |message: String| {
-            bound_embedding_error(raw.failure(message, Some(&wire.model), Some(usage.clone())))
-        };
-        validate_embedding_resolved_model(&wire.model).map_err(fail)?;
-        if wire.data.len() != request.input.len() {
-            return Err(fail("embedding row count differs from input count".into()));
-        }
-        wire.data.sort_by_key(|row| row.index);
-        if wire
-            .data
-            .iter()
-            .enumerate()
-            .any(|(index, row)| row.index != index)
-        {
-            return Err(fail(
-                "embedding indexes must identify every input exactly once".into(),
-            ));
-        }
-        let embeddings: Vec<_> = wire.data.into_iter().map(|row| row.embedding).collect();
-        validate_embeddings(request, &embeddings).map_err(fail)?;
-        validate_embedding_usage(&usage).map_err(fail)?;
-        let vector_hash = embedding_hash(&embeddings);
-        let summary = json!({
-            "id": wire.id,
-            "model": wire.model,
-            "object": raw.response.get("object"),
-            "usage": raw.response.get("usage"),
-            "embedding_count": embeddings.len(),
-            "embedding_dimensions": request.dimensions,
-            "embedding_sha256": vector_hash,
-            "response_headers": raw.response_headers,
-        });
-        Ok(EmbeddingReply {
-            embeddings,
-            metadata: CallMetadata {
-                http_status: raw.status,
-                configured_model: request.model.clone(),
-                resolved_model: wire.model,
-                request_id: wire.id,
-                provider: wire.provider,
-                latency_ms,
-                usage,
-                provider_response: summary,
-            },
-        })
-    }
-}
-
-/// Bound rejected embedding evidence after recovering its model and accounting. Large
-/// malformed vector payloads must not be copied into every failure record.
-pub(crate) fn bound_embedding_error(mut error: ModelError) -> ModelError {
-    if let ModelError::Provider { failure, .. } = &mut error {
-        if let Some(usage) = &mut failure.usage
-            && usage
-                .cost
-                .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
-        {
-            usage.cost = None;
-        }
-        let text = failure.response.to_string();
-        if text.len() > 4096 {
-            let headers = failure.response.get("_mls_response_headers").cloned();
-            failure.response = json!({
-                "truncated": true,
-                "body": text.chars().take(1024).collect::<String>(),
-                "_mls_response_headers": headers,
-            });
-        }
-    }
-    error
-}
-
-pub(crate) fn embedding_hash(embeddings: &[Vec<f64>]) -> String {
-    let bytes = serde_json::to_vec(embeddings)
-        .expect("validated finite embedding coordinates are serializable");
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-pub(crate) fn validate_embedding_request(request: &EmbeddingRequest) -> Result<(), ModelError> {
-    if request.model.trim().is_empty()
-        || request.dimensions == 0
-        || request.input.is_empty()
-        || request.input.iter().any(|text| text.trim().is_empty())
-    {
-        return Err(ModelError::InvalidResponse(
-            "embedding model, positive dimensions, and nonempty input texts are required".into(),
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_embeddings(
-    request: &EmbeddingRequest,
-    embeddings: &[Vec<f64>],
-) -> Result<(), String> {
-    if embeddings.len() != request.input.len() {
-        return Err("embedding row count differs from input count".into());
-    }
-    if embeddings
-        .iter()
-        .any(|vector| vector.len() != request.dimensions)
-    {
-        return Err("embedding vector dimensions differ from the request".into());
-    }
-    if embeddings.iter().flatten().any(|value| !value.is_finite()) {
-        return Err("embedding vector contains non-finite coordinates".into());
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_embedding_usage(usage: &Usage) -> Result<(), String> {
-    if usage
-        .cost
-        .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
-    {
-        return Err("embedding usage cost must be finite and nonnegative when reported".into());
-    }
-    Ok(())
 }
 
 impl ModelClient for OpenRouterClient {
@@ -331,7 +160,7 @@ impl ModelClient for OpenRouterClient {
         }
         if matches!(
             request.stage,
-            GenerationStage::LeanStatement | GenerationStage::LeanRepair
+            GenerationStage::Formalization | GenerationStage::FormalizationRepair
         ) && output
             .get("lean_proof")
             .is_some_and(|proof| !proof.is_null())
@@ -535,16 +364,6 @@ fn redact_value(value: &mut Value, api_key: &str) {
     }
 }
 
-pub(crate) fn validate_embedding_resolved_model(resolved: &str) -> Result<(), String> {
-    // Embedding routers may return a backend ID such as parasail-bge-m3 for baai/bge-m3.
-    // Keep that reported identity for audit; the configured request model remains exact.
-    if resolved.is_empty() || resolved.trim() != resolved || resolved.len() > 256 {
-        Err("embedding response model ID must be nonempty, trimmed, and at most 256 bytes".into())
-    } else {
-        Ok(())
-    }
-}
-
 pub(crate) fn validate_model(configured: &str, resolved: &str) -> Result<(), String> {
     // OpenRouter may canonicalize vendor/model capitalization. Preserve the reported ID in
     // metadata while accepting only the complete configured ID or its hyphen-delimited version.
@@ -682,22 +501,6 @@ struct ChatUsage {
     cost: Option<f64>,
 }
 
-#[derive(Deserialize)]
-struct EmbeddingsResponse {
-    id: Option<String>,
-    model: String,
-    provider: Option<String>,
-    data: Vec<EmbeddingRow>,
-    #[serde(default)]
-    usage: ChatUsage,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingRow {
-    index: usize,
-    embedding: Vec<f64>,
-}
-
 impl From<&ChatUsage> for Usage {
     fn from(value: &ChatUsage) -> Self {
         Self {
@@ -749,9 +552,9 @@ mod tests {
     #[test]
     fn provider_model_identity_accepts_ascii_case_and_hyphen_versions() {
         for (configured, resolved) in [
-            ("baai/bge-m3", "BAAI/bge-m3"),
-            ("BAAI/BGE-M3", "baai/bge-m3"),
-            ("baai/bge-m3", "BAAI/BGE-M3-V1"),
+            ("anthropic/claude-sonnet-5", "ANTHROPIC/claude-sonnet-5"),
+            ("ANTHROPIC/CLAUDE-SONNET-5", "anthropic/claude-sonnet-5"),
+            ("anthropic/claude-sonnet-5", "ANTHROPIC/CLAUDE-SONNET-5-V1"),
             (
                 "anthropic/claude-sonnet-5",
                 "ANTHROPIC/CLAUDE-SONNET-5-20261001",
@@ -769,76 +572,34 @@ mod tests {
     fn provider_model_identity_rejects_empty_unrelated_and_near_prefixes() {
         for (configured, resolved) in [
             ("", ""),
-            ("", "BAAI/bge-m3"),
+            ("", "ANTHROPIC/claude-sonnet-5"),
             (" ", " "),
-            ("baai/bge-m3", ""),
-            ("baai/bge-m3", "unrelated/model"),
-            ("baai/bge-m3", "BAAI/bge-m30"),
-            ("baai/bge-m3", "BAAI/bge-m3_other"),
-            ("baai/bge-m3", "BAAI/bge-m3/other"),
-            ("baai/bge-m3", "BAAI/bge-m3:other"),
-            ("baai/bge-m3", "BAAI/bge-m3 "),
-            ("baai/bge-m3", "BAAI/bgé-m3"),
+            ("anthropic/claude-sonnet-5", ""),
+            ("anthropic/claude-sonnet-5", "unrelated/model"),
+            ("anthropic/claude-sonnet-5", "ANTHROPIC/claude-sonnet-50"),
+            (
+                "anthropic/claude-sonnet-5",
+                "ANTHROPIC/claude-sonnet-5_other",
+            ),
+            (
+                "anthropic/claude-sonnet-5",
+                "ANTHROPIC/claude-sonnet-5/other",
+            ),
+            (
+                "anthropic/claude-sonnet-5",
+                "ANTHROPIC/claude-sonnet-5:other",
+            ),
+            ("anthropic/claude-sonnet-5", "ANTHROPIC/claude-sonnet-5 "),
+            ("anthropic/claude-sonnet-5", "ANTHROPIC/claudé-sonnet-5"),
             ("anthropic/claude-sonnet-5", "ANTHROPIC/CLAUDE-SONNET-55"),
-            ("anthropic/claude-sonnet-5", "parasail-bge-m3"),
+            ("anthropic/claude-sonnet-5", "unrelated-backend"),
             ("typesafe/jev-1.14", "TYPESAFE/JEV-1.140"),
-            ("typesafe/jev-1.14", "parasail-bge-m3"),
+            ("typesafe/jev-1.14", "unrelated-backend"),
         ] {
             assert!(
                 validate_model(configured, resolved).is_err(),
                 "{configured:?} / {resolved:?}"
             );
-        }
-    }
-
-    #[test]
-    fn embedding_backend_identity_is_trimmed_and_bounded_without_a_model_prefix_requirement() {
-        for resolved in [
-            "parasail-bge-m3".to_owned(),
-            "BAAI/bge-m3".into(),
-            "x".repeat(256),
-        ] {
-            assert!(validate_embedding_resolved_model(&resolved).is_ok());
-        }
-        for resolved in [
-            "".to_owned(),
-            " \t\n".into(),
-            " parasail-bge-m3".into(),
-            "parasail-bge-m3 ".into(),
-            "x".repeat(257),
-        ] {
-            assert!(validate_embedding_resolved_model(&resolved).is_err());
-        }
-    }
-
-    #[test]
-    fn rejected_nonfinite_embedding_cost_preserves_tokens_as_cost_becomes_unknown() {
-        // Nonfinite floats cannot be represented in JSON, so exercise the normalized failure
-        // boundary directly as well as the malformed-cost HTTP coverage in the offline suite.
-        for cost in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let error = ModelError::Provider {
-                message: "invalid embedding usage".into(),
-                failure: Box::new(ProviderFailure {
-                    status: 200,
-                    response: json!({"usage": {"cost": cost.to_string()}}),
-                    resolved_model: Some("baai/bge-m3".into()),
-                    usage: Some(Usage {
-                        input_tokens: Some(8),
-                        output_tokens: Some(2),
-                        total_tokens: Some(10),
-                        cost: Some(cost),
-                    }),
-                }),
-            };
-            let ModelError::Provider { failure, .. } = bound_embedding_error(error) else {
-                unreachable!()
-            };
-            let usage = failure.usage.unwrap();
-            assert_eq!(usage.cost, None);
-            assert_eq!(usage.input_tokens, Some(8));
-            assert_eq!(usage.output_tokens, Some(2));
-            assert_eq!(usage.total_tokens, Some(10));
-            assert!(failure.response["usage"]["cost"].is_string());
         }
     }
 }

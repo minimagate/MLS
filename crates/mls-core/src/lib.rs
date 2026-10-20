@@ -101,56 +101,18 @@ pub struct Diagnostic {
 /// Stable lowercase SHA-256 for the exact bytes occupied by a block.
 #[must_use]
 pub fn source_hash(source: &[u8]) -> String {
-    let mut hasher = ContentHasher::new();
-    hasher.update(source);
-    hasher.finish()
-}
-
-/// Incremental SHA-256 with the same lowercase digest as [`source_hash`].
-#[derive(Default)]
-pub struct ContentHasher(Sha256);
-
-impl ContentHasher {
-    /// Start hashing an empty byte stream.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Include the next bytes, without retaining a copy of them.
-    pub fn update(&mut self, bytes: &[u8]) {
-        self.0.update(bytes);
-    }
-
-    /// Finish the stream and return its lowercase hexadecimal SHA-256.
-    #[must_use]
-    pub fn finish(self) -> String {
-        let digest = self.0.finalize();
-        digest
-            .iter()
-            .fold(String::with_capacity(64), |mut hex, byte| {
-                write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-                hex
-            })
-    }
+    let digest = Sha256::digest(source);
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+            hex
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn incremental_hash_matches_exact_bytes_for_every_chunk_size() {
-        let bytes = b"abc\0\nmath: \xce\xb1";
-        for chunk_size in 1..=bytes.len() {
-            let mut hasher = ContentHasher::new();
-            for chunk in bytes.chunks(chunk_size) {
-                hasher.update(chunk);
-            }
-            assert_eq!(hasher.finish(), source_hash(bytes));
-        }
-        assert_eq!(ContentHasher::new().finish(), source_hash(b""));
-    }
 
     #[test]
     fn ids_round_trip() {

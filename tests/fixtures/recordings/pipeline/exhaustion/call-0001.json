@@ -2,21 +2,21 @@
   "version": 1,
   "endpoint_kind": "generation",
   "block_id": "00000000-0000-4000-8000-000000000006",
-  "attempt": 0,
+  "attempt": 1,
   "request": {
     "context": {
-      "attempt": 0,
+      "attempt": 1,
       "block_id": "00000000-0000-4000-8000-000000000006"
     },
     "endpoint": "/api/v1/chat/completions",
     "max_tokens": 4096,
     "messages": [
       {
-        "content": "Return one Lean theorem in lean_statement. Its name must be mls_00000000_0000_4000_8000_000000000006. Use set_option autoImplicit false semantics. Header binders are all explicit, in this order: one binder per SIR variable [], named as in the SIR and in order, then one hypothesis binder per SIR hypothesis, named [] and in order. Preserve every valid SIR variable name; do not add implicit or extra binders. Never introduce a hypothesis whose type is True or otherwise vacuous. If a SIR item cannot be formalized faithfully, still write the faithful statement and explain the gap in notes; do not pad the binders to match a count. lean_statement must contain exactly one `theorem` or `def` declaration and nothing else: no `set_option`, `open`, `variable`, `namespace`, `import`, attributes, comments or additional commands. Use fully qualified names (for example `Filter.atTop` or `Set.Icc`) instead of `open`. A theorem body must be exactly `:= by sorry`; do not provide a proof. lean_proof must be null.",
+        "content": "Extract only the claim stated in the source. Return the strict SIR. assumptions_made is mandatory and lists every silent choice, with unchanged meaning. Preserve the source kind and label exactly. Do not infer expected formal content from tests or metadata. Field contract: variables are exactly the free parameters of the statement, in order: the objects a theorem universally quantifies over, or the arguments of a defined notion. Never list a variable that the conclusion or a hypothesis binds with ∃ or ∀ itself. Each variable has a semi-formal type. hypotheses are only propositional assumptions about the variables, one per item, in order. Never restate a variable's type or domain membership that is already its type, such as 'x is a real number', 'f : ℝ → ℝ' or 'D ⊆ ℝ'. conclusion is, for a theorem, the claimed proposition; for a definition, the defining condition or expression of the defined notion, never a sentence that names the notion. Prefer Unicode mathematical notation (∀ ∃ ∧ ∨ ¬ → ↔ ≤ ≥ ≠ ∈ ⊆ |x| ℝ ℕ). Use no TeX commands, and avoid prose when a formula is clear. Return exactly {sir, lean_statement, lean_proof, notes}. lean_statement is one theorem named mls_00000000_0000_4000_8000_000000000006; explicit binders follow SIR variable order then hypothesis order. No extra commands, options, imports, opens, attributes, or comments. Use fully qualified Mathlib names. Imported Mathlib is available; use actual Lean diagnostics and name resolution to repair names. Do not claim search tools are unavailable or automatically run. Theorem body is exactly `:= by sorry`; definitions have a pure body and no sorry. lean_proof is null and notes is an array of strings.",
         "role": "system"
       },
       {
-        "content": "SIR:\n{\n  \"kind\": \"theorem\",\n  \"label\": \"thm:exhaustion\",\n  \"variables\": [],\n  \"hypotheses\": [],\n  \"conclusion\": \"truth\",\n  \"uses\": [],\n  \"assumptions_made\": []\n}\n\nACCEPTED DEPENDENCIES (generated name, declaration, SIR):\n[]\n\nPREVIOUS ERRORS:\n",
+        "content": "SOURCE:\n<theorem|Truth holds.<label|thm:exhaustion>>\n\nACCEPTED DEPENDENCIES (declarations and SIRs):\n[]\n\nEXACT REPAIR FEEDBACK:\ntransport error: synthetic outage 1",
         "role": "user"
       }
     ],
@@ -25,7 +25,7 @@
       "require_parameters": true
     },
     "response_format": {
-      "name": "mls_lean_statement",
+      "name": "mls_formalization",
       "strict": true,
       "type": "json_schema"
     },
@@ -38,31 +38,95 @@
         "lean_statement": {
           "type": "string"
         },
-        "mathlib_names_used": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
         "notes": {
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "sir": {
+          "additionalProperties": false,
+          "properties": {
+            "assumptions_made": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "conclusion": {
+              "type": "string"
+            },
+            "hypotheses": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "enum": [
+                "definition",
+                "theorem",
+                "lemma",
+                "proposition",
+                "corollary"
+              ]
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "uses": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "variables": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "label",
+            "variables",
+            "hypotheses",
+            "conclusion",
+            "uses",
+            "assumptions_made"
+          ],
+          "type": "object"
         }
       },
       "required": [
+        "sir",
         "lean_statement",
         "lean_proof",
-        "mathlib_names_used",
         "notes"
       ],
       "type": "object"
     },
-    "schema_version": "mls-lean-statement-v1",
-    "stage": "lean_statement"
+    "schema_version": "mls-formalization-v1",
+    "stage": "formalization_repair"
   },
-  "request_hash": "e4f4f931cd3db21939e36cd8eedb01847254bbbd9d867e1f4379d5dbb0e51b9b",
+  "request_hash": "793e036ee105ec8fcbc56837dc66471a2fd751327ab24f53cbfdbdec19cb2ece",
   "configured_model": "anthropic/claude-sonnet-5",
   "resolved_model": null,
   "usage": null,
@@ -72,7 +136,7 @@
   "response": null,
   "error": {
     "kind": "transport",
-    "message": "synthetic outage 1"
+    "message": "synthetic outage 2"
   },
   "provenance": "synthetic: mls-engine pipeline acceptance fixture"
 }

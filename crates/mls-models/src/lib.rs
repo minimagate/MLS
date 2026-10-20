@@ -1,4 +1,4 @@
-//! Typed OpenRouter generation, decision, and embedding clients with exact record/replay.
+//! Typed OpenRouter generation and decision clients with exact record/replay.
 
 mod openrouter;
 mod recording;
@@ -10,7 +10,6 @@ pub use recording::{
 };
 pub use types::{
     Answer, CallContext, CallMetadata, ChatMessage, ChoiceAnswer, ChoiceAssessment, DecisionReply,
-    DecisionRequest, EmbeddingClient, EmbeddingInputType, EmbeddingReply, EmbeddingRequest,
-    GenerationReply, GenerationRequest, GenerationStage, ModelClient, ModelConfig, ModelError,
-    NoulAnswer, NoulAssessment, ProviderFailure, Question, RetrievalConfig, Usage,
+    DecisionRequest, GenerationReply, GenerationRequest, GenerationStage, ModelClient, ModelConfig,
+    ModelError, NoulAnswer, NoulAssessment, ProviderFailure, Question, Usage,
 };

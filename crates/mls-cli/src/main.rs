@@ -16,8 +16,8 @@ use std::{
     time::Duration,
 };
 
-mod retrieval;
 mod review;
+mod serve;
 
 #[derive(Serialize)]
 struct Output<'a> {
@@ -57,11 +57,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     if arguments.first().is_some_and(|arg| arg == "batch") {
         return batch(&arguments[1..]);
     }
-    if arguments
-        .first()
-        .is_some_and(|arg| arg == "retrieval-index")
-    {
-        return retrieval::run(&arguments[1..]);
+    if arguments.first().is_some_and(|arg| arg == "serve") {
+        return serve::run(&arguments[1..]);
     }
     inspect(&arguments)
 }
@@ -217,8 +214,7 @@ fn batch(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Error>> {
     let mut checker = LeanStatementChecker::new(&mut worker);
     let pipeline = PipelineConfig {
         max_attempts,
-        sir_max_tokens: models.default_max_tokens,
-        lean_max_tokens: models.default_max_tokens,
+        formalization_max_tokens: models.default_max_tokens,
     };
     let (report, persistence) = match transport {
         Transport::Replay(mut client) => (
@@ -1102,7 +1098,7 @@ fn workspace_root() -> PathBuf {
 }
 fn print_help() {
     println!(
-        "Usage:\n  mls [--write-ids] FILE.tm\n  mls batch FILE.tm (--replay DIR | --live) [--model-config FILE] [--output FILE] [--max-attempts N]\n  mls retrieval-index INDEX_DIR (--live | --replay RECORDINGS_DIR) [--batch-size N]\n\nLive mode requires --live and MLS_LIVE=1."
+        "Usage:\n  mls [--write-ids] FILE.tm\n  mls batch FILE.tm (--replay DIR | --live) [--model-config FILE] [--output FILE] [--max-attempts N]\n  mls serve (--replay DIR | --live) [--model-config FILE]\n\nLive mode requires --live and MLS_LIVE=1."
     );
     review::print_help();
 }

@@ -1,6 +1,7 @@
 """Offline metric, invocation, and immutable-history checks for the evaluator."""
 
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -97,6 +98,108 @@ def run_with_report(corpus, report):
 
 
 class SummaryTests(unittest.TestCase):
+    def test_failure_categories_are_exclusive_and_account_for_every_nonaccepted_case(self):
+        corpus, report = realistic_inputs()
+        template = report["blocks"][2]
+        samples = [
+            ("sir_wrong", {"errors": ["SIR kind differs from tagged source kind"]}),
+            ("structure_check_mismatch", {}),
+            ("unknown_or_wrong_mathlib_name", {
+                "checks": [], "errors": ["Lean: unknown identifier 'Mathlib.Missing'"]}),
+            ("type_error", {
+                "checks": [], "errors": ["Lean: application type mismatch\nexpected Nat"]}),
+            ("other", {"checks": [], "errors": [runner.BLOCKED_DEPENDENCY]}),
+            ("other", {"checks": [], "errors": []}),
+        ]
+        corpus["cases"] = [corpus["cases"][0]]
+        report["blocks"] = [report["blocks"][0]]
+        for index, (category, fields) in enumerate(samples):
+            block_id = f"failure-{index}"
+            label = f"thm:failure-{index}"
+            corpus["cases"].append({"id": block_id, "block_id": block_id,
+                                    "expected_sir": sir(label)})
+            block = dict(template, block_id=block_id, label=label, **fields)
+            report["blocks"].append(block)
+        result = runner.summarize(corpus, report)
+        failures = result["failures"]
+        self.assertEqual(failures["taxonomy_version"], runner.FAILURE_TAXONOMY_VERSION)
+        self.assertEqual([case["category"] for case in failures["cases"]],
+                         [category for category, _ in samples])
+        self.assertEqual(failures["category_counts"], {
+            "sir_wrong": 1, "structure_check_mismatch": 1,
+            "unknown_or_wrong_mathlib_name": 1, "type_error": 1, "other": 2,
+        })
+        self.assertEqual(sum(failures["category_counts"].values()), failures["count"])
+        self.assertEqual(failures["count"] + result["accepted_unconfirmed"]["count"],
+                         len(corpus["cases"]))
+        self.assertEqual(len({case["block_id"] for case in failures["cases"]}),
+                         failures["count"])
+        self.assertEqual(result, runner.summarize(corpus, report))
+
+    def test_failure_category_precedence_and_explicit_sir_evidence(self):
+        block = {
+            "errors": ["Lean: unknown identifier 'Real.Missing'"],
+            "lean_diagnostics": [{"message": "application type mismatch\nexpected Nat"}],
+            "checks": [{"hard": True, "scope": "structure", "state": "mismatch"}],
+        }
+        self.assertEqual(runner.failure_category(block), "structure_check_mismatch")
+        for error in (
+            "SIR label differs from source label",
+            "SIR uses differ from deterministically linked dependency labels",
+            'SIR variable name "match" cannot be preserved as a generated Lean binder',
+            "SIR variable h0 conflicts with the canonical hypothesis binder",
+            "the regenerated SIR equals the rejected SIR",
+        ):
+            with self.subTest(error=error):
+                self.assertEqual(runner.failure_category(dict(block, errors=[error])), "sir_wrong")
+        block["checks"] = []
+        self.assertEqual(runner.failure_category(block), "unknown_or_wrong_mathlib_name")
+        block["errors"] = []
+        self.assertEqual(runner.failure_category(block), "type_error")
+
+    def test_lean_diagnostics_classify_names_and_types_without_matching_arbitrary_prose(self):
+        samples = [
+            ("Unknown constant `Real.notInMathlib`", "unknown_or_wrong_mathlib_name"),
+            ("unknown namespace 'NotMathlib'", "unknown_or_wrong_mathlib_name"),
+            ("invalid field 'missing'", "unknown_or_wrong_mathlib_name"),
+            ("type mismatch\n  x\nhas type Nat but is expected to have type Bool", "type_error"),
+            ("application argument type mismatch\n  x", "type_error"),
+            ("function expected at\n  x", "type_error"),
+            ("failed to synthesize\n  Add Foo", "type_error"),
+            ("invalid MLS declaration source: declaration contains unsupported syntax 'group'",
+             "other"),
+        ]
+        for message, category in samples:
+            with self.subTest(message=message):
+                for block in ({"lean_diagnostics": [{"message": message}]},
+                              {"errors": [f"Lean: line 1, column 0: {message}"]}):
+                    self.assertEqual(runner.failure_category(block), category)
+        for message in ("unknown identifier in provider response", "type mismatch in source",
+                        "invalid provider response: completion did not finish normally: length"):
+            self.assertEqual(runner.failure_category({"errors": [message]}), "other")
+        self.assertEqual(runner.failure_category({"checks": [
+            {"scope": "semantics", "hard": True, "state": "mismatch"}]}), "other")
+
+    def test_reference_wording_and_missing_sir_never_imply_sir_wrong(self):
+        corpus, report = realistic_inputs()
+        # The same observed failure keeps its category when the private oracle changes.
+        baseline = runner.summarize(corpus, report)["failures"]
+        changed = copy.deepcopy(corpus)
+        for case in changed["cases"]:
+            case["expected_sir"]["conclusion"] = "A differently worded reference"
+        self.assertEqual(runner.summarize(changed, report)["failures"], baseline)
+        self.assertEqual(runner.failure_category({"sir": None, "errors": [
+            "invalid provider response: completion did not finish normally: length"]}), "other")
+
+    def test_no_failures_keeps_all_zero_categories(self):
+        corpus, report = realistic_inputs()
+        corpus["cases"] = corpus["cases"][:1]
+        report["blocks"] = report["blocks"][:1]
+        failures = runner.summarize(corpus, report)["failures"]
+        self.assertEqual(failures["count"], 0)
+        self.assertEqual(failures["cases"], [])
+        self.assertEqual(failures["category_counts"], dict.fromkeys(runner.FAILURE_CATEGORIES, 0))
+
     def test_exact_details_omit_reference_hashes_and_withhold_generated_hash_on_match(self):
         corpus, report = realistic_inputs()
         details = {item["case_id"]: item for item in

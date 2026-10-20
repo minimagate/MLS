@@ -132,6 +132,34 @@ class ExtractorIntegrationTests(unittest.TestCase):
         self.assertEqual(found[0]["declaration"], name)
         return response
 
+    def validate_proof(self, source: str, name: str) -> dict:
+        response = self.repl.request({
+            "env": self.base_env,
+            "cmd": f"#mls_validate_proof_source {name} from_source {lean_string(source)}",
+        })
+        self.assertEqual(errors(response), [], response)
+        found = [
+            json.loads(m["data"][len("MLS_VALIDATE_PROOF:"):])
+            for m in response.get("messages", [])
+            if m.get("data", "").startswith("MLS_VALIDATE_PROOF:")
+        ]
+        self.assertEqual(len(found), 1, response)
+        self.assertEqual(found[0]["declaration"], name)
+        return response
+
+    def reject_proof(self, source: str, name: str, fragment: str) -> None:
+        response = self.repl.request({
+            "env": self.base_env,
+            "cmd": f"#mls_validate_proof_source {name} from_source {lean_string(source)}",
+        })
+        self.assertTrue(errors(response), response)
+        self.assertFalse(any(
+            m.get("data", "").startswith("MLS_VALIDATE_PROOF:")
+            for m in response.get("messages", [])
+        ), response)
+        messages = "\n".join(m.get("data", "") for m in errors(response))
+        self.assertIn(fragment, messages, response)
+
     def test_persistent_dependencies_and_transitive_sorry(self) -> None:
         first, base = self.extract(FIXTURES["sorry_base"], "sorry_base")
         self.assertTrue(base["has_sorry"])
@@ -234,6 +262,38 @@ class ExtractorIntegrationTests(unittest.TestCase):
             })
             self.assertTrue(errors(response), response)
             self.assertEqual(validation_payloads(response), [])
+
+    def test_proof_admission_blocks_network_search_before_execution(self) -> None:
+        # The validator only parses candidate source. These pinned Mathlib tactic
+        # forms must be rejected here, before their tactic elaborators can run.
+        cases = [
+            ("proof_loogle", "#loogle Nat.add_comm",
+             "proof declaration contains blocked syntax '#loogle'"),
+            ("proof_leansearch", '#leansearch "Commutativity of addition."',
+             "proof declaration contains blocked syntax '#leansearch'"),
+            ("proof_moogle", '#moogle "Commutativity of addition."',
+             "proof declaration contains blocked syntax '#moogle'"),
+            ("proof_statesearch", "#statesearch",
+             "proof declaration contains blocked syntax '#statesearch'"),
+            ("proof_search", '#search "Commutativity of addition."',
+             "proof declaration contains blocked syntax '#search'"),
+            ("proof_polyrith", "polyrith",
+             "proof declaration contains blocked syntax 'polyrith'"),
+        ]
+        for name, tactic, blocked in cases:
+            with self.subTest(tactic=tactic):
+                source = f"theorem {name} (n m : ℕ) : n + m = m + n := by {tactic}"
+                self.reject_proof(source, name, blocked)
+
+        # Local library search remains an allowed proof tactic.
+        self.validate_proof(
+            "theorem proof_exact_search (n m : ℕ) : n + m = m + n := by exact?",
+            "proof_exact_search",
+        )
+        self.validate_proof(
+            "theorem proof_apply_search (n m : ℕ) : n + m = m + n := by apply?",
+            "proof_apply_search",
+        )
 
     def reject(self, name: str, source: str, fragment: str | None = None) -> None:
         response = self.repl.request({

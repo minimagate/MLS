@@ -330,10 +330,24 @@ pub struct ReviewView {
     pub document: String,
     /// Blocks per view status. All four keys are always present.
     pub counts: StatusCounts,
+    /// Counts by proof result, present after at least one proof attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_counts: Option<ProofStatusCounts>,
     /// Whether any block needs a new run or review, or the last report lists a removed block.
     pub needs_rerun: bool,
     /// The last report's formal blocks in report order, then formal blocks the report does not list.
     pub blocks: Vec<BlockView>,
+}
+
+/// Number of confirmed statements in each proof state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ProofStatusCounts {
+    /// Proofs accepted by Lean.
+    pub verified: usize,
+    /// Statements without a checked proof or refutation.
+    pub unproven: usize,
+    /// Statements with separately checked counterexample evidence.
+    pub refuted: usize,
 }
 
 /// The view of one formal block.
@@ -361,6 +375,12 @@ pub struct BlockView {
     pub checks: Vec<StructureCheck>,
     /// Errors of the last run.
     pub errors: Vec<String>,
+    /// Compact status for a badge, when proof search has run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_status: Option<crate::proof::ProofState>,
+    /// Proof state and block-local Lean diagnostics for a confirmed statement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<crate::proof::ProofReport>,
     /// The last run regenerated the confirmed SIR from a cosmetic edit.
     pub cosmetic_reconfirmation: bool,
     /// How a regenerated SIR differs from the confirmed SIR it replaces.
@@ -499,8 +519,19 @@ pub fn review_view(
         }
     }
     let mut counts = StatusCounts::default();
+    let mut proof_counts = ProofStatusCounts::default();
+    let mut has_proof = false;
     for block in &blocks {
         count_status(&mut counts, block.status);
+        if let Some(proof_status) = block.proof_status {
+            has_proof = true;
+            let slot = match proof_status {
+                crate::proof::ProofState::Verified => &mut proof_counts.verified,
+                crate::proof::ProofState::Unproven => &mut proof_counts.unproven,
+                crate::proof::ProofState::Refuted => &mut proof_counts.refuted,
+            };
+            *slot += 1;
+        }
     }
     let removed = report
         .blocks
@@ -511,6 +542,7 @@ pub fn review_view(
         protocol: VIEW_PROTOCOL,
         document: document.to_owned(),
         counts,
+        proof_counts: has_proof.then_some(proof_counts),
         needs_rerun,
         blocks,
     }
@@ -597,6 +629,10 @@ fn block_view(
         errors: report
             .map(|report| report.errors.clone())
             .unwrap_or_default(),
+        proof_status: report
+            .and_then(|report| report.proof.as_ref())
+            .map(|proof| crate::proof::ProofState::from(&proof.status)),
+        proof: report.and_then(|report| report.proof.clone()),
         cosmetic_reconfirmation: report.is_some_and(|report| report.cosmetic_reconfirmation),
         superseded_confirmation: report.and_then(|report| report.superseded_confirmation.clone()),
         previously_rejected: matches!(entry, Some(ReviewEntry::Rejected { .. })),
@@ -843,9 +879,23 @@ fn summarize(
         }
         None => {}
     }
-    if parts.is_empty() {
+    let mut message = if parts.is_empty() {
         status_name(status).to_owned()
     } else {
         format!("{}: {}", status_name(status), parts.join("; "))
+    };
+    if let Some(proof) = report.and_then(|report| report.proof.as_ref()) {
+        let proof_status = match proof.status {
+            crate::proof::ProofStatus::Verified => "verified",
+            crate::proof::ProofStatus::Unproven => "unproven",
+            crate::proof::ProofStatus::Refuted { .. } => "refuted",
+        };
+        message.push_str("; proof ");
+        message.push_str(proof_status);
+        if let Some(diagnostic) = proof.diagnostics.first() {
+            message.push_str(": ");
+            message.push_str(&diagnostic.message);
+        }
     }
+    message
 }

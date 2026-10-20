@@ -4,7 +4,7 @@
 //! entry is reusable only under its key, and caching never confers confirmation: a cached SIR is
 //! still a draft, and a cached Lean declaration is still re-checked by Lean before it is accepted.
 
-use crate::SIR_SCHEMA_VERSION;
+use crate::FORMALIZATION_SCHEMA_VERSION;
 use mls_core::BlockId;
 use mls_sir::Sir;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 pub fn sir_cache_key(model: &str, text_hash: &str, dependencies: &[(BlockId, String)]) -> String {
     let mut lines = vec![
         format!("model {model}"),
-        format!("schema {SIR_SCHEMA_VERSION}"),
+        format!("schema {FORMALIZATION_SCHEMA_VERSION}"),
         format!("text {text_hash}"),
     ];
     lines.extend(

@@ -8,8 +8,8 @@ use super::gate::{FinishedOracle, Gate, GateConfig};
 use super::runner::{Dependency, JobContext, JobOutcome, JobResult, JobRunner};
 use super::scheduler::{Candidate, Completion, Job, Priority, Stale};
 use crate::{
-    BatchReport, BlockReport, ReviewEntry, ReviewError, ReviewStore, ReviewView, UsageSummary,
-    declaration_name, empty_report, review_view, validate_sir_identity,
+    BatchReport, BlockReport, BlockStatus, ReviewEntry, ReviewError, ReviewStore, ReviewView,
+    UsageSummary, declaration_name, empty_report, review_view, validate_sir_identity,
 };
 use mls_core::{Block, BlockId};
 use mls_sir::Sir;
@@ -52,6 +52,9 @@ pub enum ReviewAction {
 pub struct UpdateHints {
     /// Complete implicit-link overlay: source block to one earlier labeled target.
     pub implicit_links: BTreeMap<BlockId, BlockId>,
+    /// Confident Jev classifications that an untagged prose block is a mathematical claim.
+    /// Proof steps, commentary and fallback results are omitted and remain non-formal.
+    pub prose_claims: BTreeSet<BlockId>,
     /// Blocks whose edit was judged cosmetic. Unsafe or inapplicable hints are ignored.
     pub cosmetic_edits: BTreeSet<BlockId>,
 }
@@ -99,6 +102,8 @@ pub struct Engine {
     gate: Gate,
     /// Formal blocks that must be formalized again.
     dirty: BTreeSet<BlockId>,
+    /// Confirmed blocks with settled statements whose proof has not been attempted yet.
+    proof_pending: BTreeSet<BlockId>,
     /// When each dirty block last changed or was dirtied, in milliseconds.
     touched: BTreeMap<BlockId, u64>,
     /// Blocks the cursor has just left, which skip the debounce.
@@ -133,6 +138,7 @@ impl Engine {
             lean_cache,
             gate,
             dirty: BTreeSet::new(),
+            proof_pending: BTreeSet::new(),
             touched: BTreeMap::new(),
             left_ready: BTreeSet::new(),
             active: None,
@@ -257,9 +263,11 @@ impl Engine {
             .filter(|id| self.cosmetic_hint_eligible(**id))
             .filter_map(|id| self.document.block(*id).cloned().map(|state| (*id, state)))
             .collect();
-        let change = self
-            .document
-            .update_with_links(source, &hints.implicit_links)?;
+        let change = self.document.update_with_links_and_prose_claims(
+            source,
+            &hints.implicit_links,
+            &hints.prose_claims,
+        )?;
         for id in &change.removed {
             self.forget_block(*id);
         }
@@ -317,7 +325,7 @@ impl Engine {
             .map(|left| self.document.downstream([left]))
             .unwrap_or_default();
         let mut candidates = Vec::new();
-        for id in &self.dirty {
+        for id in self.dirty.union(&self.proof_pending) {
             if self.active == Some(*id)
                 || self.in_flight.contains_key(id)
                 || !self.upstream_ready(*id)
@@ -361,6 +369,7 @@ impl Engine {
                 ticket: self.next_ticket,
                 generation: self.generations.get(&id).copied().unwrap_or(0),
                 block: id,
+                proof_only: !self.dirty.contains(&id) && self.proof_pending.contains(&id),
                 revision: self.document.revision(),
                 text_hash,
                 dependency_hashes: self.dependency_hashes(id),
@@ -419,6 +428,8 @@ impl Engine {
         }
         Some(JobContext {
             block,
+            proof_only: job.proof_only,
+            current_report: self.reports.get(&job.block),
             canonical: self.document.canonical(job.block),
             expected_uses: expected_uses(&self.document, block),
             failed_dependency,
@@ -448,6 +459,9 @@ impl Engine {
         if let Some(stale) = self.staleness(&job) {
             return Completion::Stale(stale);
         }
+        if job.proof_only {
+            self.proof_pending.remove(&job.block);
+        }
         let Some(block) = self.document.block_info(job.block) else {
             return Completion::Stale(Stale::BlockRemoved);
         };
@@ -472,7 +486,7 @@ impl Engine {
             let key = sir_cache_key(&self.config.model, &job.text_hash, &dependencies);
             let provenance = SirProvenance {
                 model: self.config.model.clone(),
-                schema_version: crate::SIR_SCHEMA_VERSION.into(),
+                schema_version: crate::FORMALIZATION_SCHEMA_VERSION.into(),
                 text_hash: job.text_hash.clone(),
                 dependencies: dependencies.clone(),
                 revision: self.document.revision(),
@@ -547,11 +561,30 @@ impl Engine {
             ReviewAction::Confirm(_) => {
                 self.review.confirm(block, report)?;
                 cache_confirmed_lean(&mut self.review, block, report);
+                if report.proof.is_none()
+                    && report.accepted_speculatively
+                    && report
+                        .sir
+                        .as_ref()
+                        .is_some_and(|sir| sir.kind() != mls_sir::StatementKind::Definition)
+                {
+                    self.proof_pending.insert(id);
+                }
             }
-            ReviewAction::Reject(_) => self.review.reject(block, report)?,
+            ReviewAction::Reject(_) => {
+                self.review.reject(block, report)?;
+                self.proof_pending.remove(&id);
+                if let Some(report) = self.reports.get_mut(&id) {
+                    report.proof = None;
+                }
+            }
             ReviewAction::Edit { sir_json, .. } => {
                 let uses = expected_uses(&self.document, block);
                 self.review.edit(block, &uses, &sir_json)?;
+                self.proof_pending.remove(&id);
+                if let Some(report) = self.reports.get_mut(&id) {
+                    report.proof = None;
+                }
             }
         }
         self.review_marks
@@ -573,26 +606,75 @@ impl Engine {
     }
 
     /// The review view of the document, from the last applied reports and the decisions in effect.
-    /// Blocks without a finished report appear as not formalized and need a rerun.
+    /// Blocks without a finished report appear as not formalized and need a rerun. Dirty blocks
+    /// expose no accepted Lean statement or current checks until a new outcome is applied.
     #[must_use]
     pub fn view(&self) -> ReviewView {
         let blocks = self
             .document
             .order()
             .iter()
-            .filter_map(|id| self.reports.get(id).cloned())
+            .filter_map(|id| {
+                let mut report = self.reports.get(id)?.clone();
+                if self.dirty.contains(id) {
+                    // Retain the SIR for review, but never present an invalidated declaration as
+                    // accepted. Resolve dependencies against these pending reports as well.
+                    report.accepted_speculatively = false;
+                    report.elaborated = false;
+                    report.complete_structure = false;
+                    report.lean_statement = None;
+                    report.proof = None;
+                    report.checks.clear();
+                    report.status = if report.sir.is_some() {
+                        BlockStatus::SirDrafted
+                    } else {
+                        BlockStatus::NotFormalized
+                    };
+                }
+                Some(report)
+            })
             .collect();
         let report = BatchReport {
             diagnostics: self.document.analysis().diagnostics.clone(),
             blocks,
             usage: self.usage.clone(),
         };
-        review_view(
+        let mut view = review_view(
             &self.config.document,
             self.document.analysis(),
             &report,
             &self.review,
-        )
+        );
+        for block in &mut view.blocks {
+            if self.proof_pending.contains(&block.block_id) && !self.dirty.contains(&block.block_id)
+            {
+                block.needs_rerun = true;
+                block.message = "proof pending for confirmed statement".into();
+            }
+            if self.dirty.contains(&block.block_id) {
+                // A retained usable SIR is drafted while its Lean is queued or being rechecked,
+                // as for pending human edits. An actual settled failure remains an error.
+                if block.status == BlockStatus::StatementConfirmed {
+                    block.status = BlockStatus::SirDrafted;
+                }
+                block.needs_rerun = true;
+                block.message = "formalization pending; Lean statement must be rechecked".into();
+            }
+        }
+        // The live pending overlay can change statuses returned by the batch review resolver.
+        view.counts = crate::StatusCounts::default();
+        for block in &view.blocks {
+            let count = match block.status {
+                BlockStatus::NotFormalized => &mut view.counts.not_formalized,
+                BlockStatus::SirDrafted => &mut view.counts.sir_drafted,
+                BlockStatus::StatementConfirmed => &mut view.counts.statement_confirmed,
+                BlockStatus::FormalizationError => &mut view.counts.formalization_error,
+            };
+            *count += 1;
+        }
+        view.needs_rerun |= !self.dirty.is_empty();
+        view.needs_rerun |= !self.proof_pending.is_empty();
+        view
     }
 
     fn move_cursor(&mut self, active: Option<BlockId>) {
@@ -615,6 +697,7 @@ impl Engine {
 
     fn forget_block(&mut self, id: BlockId) {
         self.dirty.remove(&id);
+        self.proof_pending.remove(&id);
         self.touched.remove(&id);
         self.left_ready.remove(&id);
         self.settled.remove(&id);
@@ -632,6 +715,7 @@ impl Engine {
 
     fn mark_dirty(&mut self, id: BlockId, now: u64) {
         self.dirty.insert(id);
+        self.proof_pending.remove(&id);
         self.touched.insert(id, now);
         self.left_ready.remove(&id);
         *self.generations.entry(id).or_default() += 1;

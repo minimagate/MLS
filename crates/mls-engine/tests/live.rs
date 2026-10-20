@@ -5,15 +5,15 @@
 mod common;
 
 use common::*;
-use mls_core::BlockId;
+use mls_core::{BlockId, BlockKind};
 use mls_engine::live::{
     ActionError, ChangeSet, Clock, Completion, Document, Engine, EngineConfig, Finished,
     FinishedOracle, FinishedQuery, GateConfig, JobOutcome, JobRunner, LeanCache, ManualClock,
     OracleAnswer, PipelineRunner, ReviewAction, SirCache, SirProvenance, Stale, UpdateHints,
     sir_cache_key,
 };
-use mls_engine::{BlockStatus, ReviewStore, ReviewView, UsageSummary};
-use mls_models::{GenerationReply, GenerationRequest, GenerationStage, ModelClient, ModelError};
+use mls_engine::{BlockStatus, ReviewStore, ReviewView, UsageSummary, declaration_name};
+use mls_models::{GenerationReply, GenerationRequest, ModelClient, ModelError};
 use mls_sir::Sir;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -79,11 +79,49 @@ fn three(first_text: &str) -> Vec<Spec> {
     ]
 }
 
+fn prose_source(block: BlockId, text: &str) -> Vec<u8> {
+    format!("<TeXmacs|2.1.4>\n<\\body>\n<\\with|mls-id|{block}>{text}</with>\n</body>\n")
+        .into_bytes()
+}
+
+struct ProseClaimModel;
+
+impl ModelClient for ProseClaimModel {
+    fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
+        let block: BlockId = request.context.block_id.parse().unwrap();
+        Ok(reply(
+            1,
+            json!({
+                "sir": {
+                    "kind": "theorem",
+                    "label": null,
+                    "variables": [],
+                    "hypotheses": [],
+                    "conclusion": "True",
+                    "uses": [],
+                    "assumptions_made": []
+                },
+                "lean_statement": format!("theorem {} : True := by sorry", declaration_name(block)),
+                "lean_proof": null,
+                "notes": []
+            }),
+        ))
+    }
+
+    fn decide(
+        &mut self,
+        _: &mls_models::DecisionRequest,
+    ) -> Result<mls_models::DecisionReply, ModelError> {
+        unreachable!("the engine does not classify prose")
+    }
+}
+
 /// Scripted generation: each block's SIR comes from its spec, and every SIR call is counted.
 struct Model {
     specs: BTreeMap<BlockId, (String, Vec<String>, String)>,
     sir_calls: Vec<BlockId>,
     lean_calls: usize,
+    proof_calls: usize,
 }
 
 impl Model {
@@ -93,6 +131,7 @@ impl Model {
             specs: BTreeMap::new(),
             sir_calls: Vec::new(),
             lean_calls: 0,
+            proof_calls: 0,
         };
         for block in blocks {
             model.set(
@@ -122,10 +161,20 @@ impl Model {
 
 impl ModelClient for Model {
     fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
-        if request.stage != GenerationStage::Sir {
-            self.lean_calls += 1;
-            return Ok(lean("theorem placeholder : True := by sorry"));
+        if matches!(
+            request.stage,
+            mls_models::GenerationStage::Proof | mls_models::GenerationStage::ProofRepair
+        ) {
+            self.proof_calls += 1;
+            return Ok(reply(
+                1,
+                json!({
+                    "proof_sir": {"steps":["truth introduction"],"uses":[],"assumptions_made":[]},
+                    "lean_proof": "by trivial"
+                }),
+            ));
         }
+        self.lean_calls += 1;
         let block: BlockId = request.context.block_id.parse().unwrap();
         self.sir_calls.push(block);
         let (label, uses, conclusion) = self
@@ -135,7 +184,7 @@ impl ModelClient for Model {
             .clone();
         Ok(reply(
             1,
-            json!({
+            json!({"sir": {
                 "kind": "theorem",
                 "label": label,
                 "variables": [],
@@ -143,7 +192,7 @@ impl ModelClient for Model {
                 "conclusion": conclusion,
                 "uses": uses,
                 "assumptions_made": []
-            }),
+            }, "lean_statement":"theorem placeholder : True := by sorry", "lean_proof":null, "notes": []}),
         ))
     }
 
@@ -202,6 +251,128 @@ fn confirm_all(engine: &mut Engine, numbers: &[u8]) {
             .on_review(ReviewAction::Confirm(id(*number)), 1_000_000)
             .unwrap();
     }
+}
+
+#[test]
+fn confident_prose_claim_is_a_theorem_draft_and_never_auto_confirmed() {
+    let source = prose_source(id(9), "The claim holds.");
+    let hints = UpdateHints {
+        prose_claims: BTreeSet::from([id(9)]),
+        ..UpdateHints::default()
+    };
+    let mut engine = engine_with(0);
+    engine
+        .on_change_with_hints(&source, None, 0, &hints)
+        .unwrap();
+    assert_eq!(
+        engine.document().block(id(9)).unwrap().kind,
+        BlockKind::ProseClaim
+    );
+    assert_eq!(
+        mls_engine::formal_block(engine.document().analysis(), id(9))
+            .unwrap()
+            .kind,
+        BlockKind::ProseClaim
+    );
+    assert!(engine.dirty().contains(&id(9)));
+
+    let job = engine
+        .next_job(10_000)
+        .expect("a confident claim is scheduled");
+    assert_eq!(job.block, id(9));
+    let outcome = {
+        let context = engine.context(&job).unwrap();
+        assert_eq!(context.block.kind, BlockKind::ProseClaim);
+        let mut models = ProseClaimModel;
+        let mut checker = EchoChecker;
+        PipelineRunner::new(&mut models, &mut checker, config()).run(&job, &context)
+    };
+    assert_eq!(engine.complete(job, outcome), Completion::Applied);
+    let view = engine.view();
+    let report = view
+        .blocks
+        .iter()
+        .find(|block| block.block_id == id(9))
+        .unwrap();
+    assert_eq!(report.status, BlockStatus::SirDrafted);
+    assert_eq!(
+        report.sir.as_ref().unwrap().kind(),
+        mls_sir::StatementKind::Theorem
+    );
+    assert_eq!(engine.sir_cache().len(), 1);
+    assert_eq!(engine.lean_cache().len(), 1);
+    assert!(engine.review().entry(id(9)).is_none());
+}
+
+#[test]
+fn prose_claim_override_is_removed_when_text_changes_without_a_confident_reclassification() {
+    let mut engine = engine_with(0);
+    let source = prose_source(id(9), "The first claim holds.");
+    engine
+        .on_change_with_hints(
+            &source,
+            None,
+            0,
+            &UpdateHints {
+                prose_claims: BTreeSet::from([id(9)]),
+                ..UpdateHints::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        engine.document().block(id(9)).unwrap().kind,
+        BlockKind::ProseClaim
+    );
+
+    engine
+        .on_change_with_hints(
+            &prose_source(id(9), "This text has not been classified yet."),
+            None,
+            10,
+            &UpdateHints::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine.document().block(id(9)).unwrap().kind,
+        BlockKind::Commentary
+    );
+    assert!(engine.dirty().is_empty());
+    assert!(engine.view().blocks.is_empty());
+}
+
+#[test]
+fn classified_claims_enter_and_leave_the_formal_dependency_graph() {
+    let source = format!(
+        "<TeXmacs|2.1.4>\n<\\body>\n<\\with|mls-id|{}><\\theorem>Base<label|base></theorem></with>\n<\\with|mls-id|{}>By the base result, this claim follows.<reference|base></with>\n</body>\n",
+        id(1),
+        id(9)
+    );
+    let mut engine = engine_with(0);
+    engine
+        .on_change_with_hints(
+            source.as_bytes(),
+            None,
+            0,
+            &UpdateHints {
+                prose_claims: BTreeSet::from([id(9)]),
+                ..UpdateHints::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(engine.document().formal_dependencies(id(9)), [id(1)]);
+    assert!(engine.document().dependents(id(1)).contains(&id(9)));
+    assert_eq!(engine.document().dependency_order(), [id(1), id(9)]);
+    assert_eq!(engine.next_job(10_000).unwrap().block, id(1));
+
+    engine
+        .on_change_with_hints(source.as_bytes(), None, 10, &UpdateHints::default())
+        .unwrap();
+    assert_eq!(
+        engine.document().block(id(9)).unwrap().kind,
+        BlockKind::Commentary
+    );
+    assert!(!engine.document().dependents(id(1)).contains(&id(9)));
+    assert_eq!(engine.document().dependency_order(), [id(1)]);
 }
 
 #[test]
@@ -639,6 +810,13 @@ fn dependency_edit_invalidates_downstream_statuses_and_lean_keys() {
         .unwrap();
     let view = engine.view();
     assert_eq!(status(&view, 2), BlockStatus::SirDrafted);
+    let dependent = view
+        .blocks
+        .iter()
+        .find(|block| block.block_id == id(2))
+        .unwrap();
+    assert!(dependent.needs_rerun);
+    assert!(dependent.lean_statement.is_none());
 
     settle(&mut engine, &mut models, &mut checker);
     let view = engine.view();
@@ -671,8 +849,9 @@ fn sir_cache_hit_makes_no_model_call_after_an_unrelated_edit() {
     settle(&mut engine, &mut models, &mut checker);
     assert_eq!(models.sir_calls[3..], [id(1)]);
     assert_eq!(
-        models.lean_calls, lean_calls,
-        "Lean declarations are re-checked, not regenerated"
+        models.lean_calls,
+        lean_calls + 1,
+        "one combined formalization call checks the edited block"
     );
 
     // Block 3 is unrelated to the rest: only its own SIR is generated again.
@@ -716,6 +895,61 @@ fn review_actions_follow_the_cli_preconditions() {
     assert!(
         engine.review().entry(id(1)).is_none(),
         "a refused action changes nothing"
+    );
+}
+
+#[test]
+fn confirmation_schedules_proof_without_hiding_statement_and_runs_once() {
+    let blocks = [Spec {
+        number: 1,
+        text: "Truth holds.".into(),
+        deps: vec![],
+    }];
+    let mut engine = engine_with(0);
+    engine
+        .on_change(&render(&blocks, "  ", "\n"), None, 0)
+        .unwrap();
+    let mut models = Model::for_blocks(&blocks);
+    let mut checker = EchoChecker;
+    settle(&mut engine, &mut models, &mut checker);
+
+    let accepted_before = engine.view().blocks[0].lean_statement.clone();
+    engine.on_review(ReviewAction::Confirm(id(1)), 10).unwrap();
+    let pending = engine.view();
+    assert_eq!(status(&pending, 1), BlockStatus::StatementConfirmed);
+    assert_eq!(pending.blocks[0].lean_statement, accepted_before);
+    assert!(pending.blocks[0].needs_rerun);
+
+    let job = engine.next_job(10).expect("confirmation queues proof work");
+    assert!(job.proof_only);
+    let outcome = {
+        let context = engine.context(&job).unwrap();
+        PipelineRunner::new(&mut models, &mut checker, config()).run(&job, &context)
+    };
+    assert_eq!(engine.complete(job, outcome), Completion::Applied);
+    let completed = engine.view();
+    assert_eq!(status(&completed, 1), BlockStatus::StatementConfirmed);
+    assert_eq!(completed.blocks[0].lean_statement, accepted_before);
+    assert_eq!(
+        completed.blocks[0].proof.as_ref().unwrap().status,
+        mls_engine::proof::ProofStatus::Unproven
+    );
+    assert_eq!(
+        completed.blocks[0].proof_status,
+        Some(mls_engine::proof::ProofState::Unproven)
+    );
+    assert_eq!(completed.proof_counts.unwrap().unproven, 1);
+    assert_eq!(
+        models.proof_calls, 3,
+        "default proof repair bound is honored"
+    );
+    assert!(engine.next_job(10).is_none());
+
+    assert!(engine.retry(id(1), 20));
+    settle(&mut engine, &mut models, &mut checker);
+    assert_eq!(
+        models.proof_calls, 3,
+        "the same confirmed statement reuses its checked proof result"
     );
 }
 
@@ -852,6 +1086,7 @@ fn explicit_and_implicit_edges_share_cycle_errors_and_engine_atomicity() {
     let dirty = engine.dirty().clone();
     let invalid = UpdateHints {
         implicit_links: BTreeMap::from([(id(99), id(1))]),
+        prose_claims: BTreeSet::new(),
         cosmetic_edits: BTreeSet::from([id(3)]),
     };
     assert!(
@@ -1583,4 +1818,78 @@ fn the_view_names_the_document_and_counts_every_formal_block() {
     assert_eq!(view.blocks.len(), 3);
     assert_eq!(view.counts.sir_drafted, 3);
     assert!(!view.needs_rerun);
+}
+
+#[test]
+fn retry_makes_confirmed_blocks_and_dependents_visibly_pending_until_reapplied() {
+    let blocks = three("Truth holds.");
+    let mut models = Model::for_blocks(&blocks);
+    let mut checker = EchoChecker;
+    let mut engine = engine_with(0);
+    engine.on_change(&render(&blocks, "", ""), None, 0).unwrap();
+    settle(&mut engine, &mut models, &mut checker);
+    confirm_all(&mut engine, &[1, 2, 3]);
+    assert_eq!(engine.view().counts.statement_confirmed, 3);
+    assert!(
+        engine.view().needs_rerun,
+        "human confirmation schedules proof work without invalidating statements"
+    );
+
+    assert!(engine.retry(id(1), 2_000_000));
+    let assert_pending = |engine: &Engine, pending: &[u8]| {
+        let view = engine.view();
+        assert!(view.needs_rerun);
+        for number in pending {
+            let block = view
+                .blocks
+                .iter()
+                .find(|block| block.block_id == id(*number))
+                .unwrap();
+            assert!(block.needs_rerun);
+            assert_eq!(block.status, BlockStatus::SirDrafted);
+            assert!(block.message.contains("pending"));
+            assert!(block.lean_statement.is_none());
+            assert!(block.checks.is_empty());
+        }
+    };
+    assert_pending(&engine, &[1, 2]);
+    assert_eq!(engine.view().counts.statement_confirmed, 1);
+    assert_eq!(status(&engine.view(), 3), BlockStatus::StatementConfirmed);
+    let job = engine.next_job(2_000_000).unwrap();
+    assert_eq!(job.block, id(1));
+    assert_pending(&engine, &[1, 2]);
+    let context = engine.context(&job).unwrap();
+    let outcome = PipelineRunner::new(&mut models, &mut checker, config()).run(&job, &context);
+    assert_eq!(engine.complete(job, outcome), Completion::Applied);
+    assert_eq!(status(&engine.view(), 1), BlockStatus::StatementConfirmed);
+    assert_pending(&engine, &[2]);
+    settle(&mut engine, &mut models, &mut checker);
+    assert!(!engine.view().needs_rerun);
+    assert_eq!(engine.view().counts.statement_confirmed, 3);
+}
+
+#[test]
+fn failed_settled_lean_is_an_error_while_retry_with_a_retained_sir_is_drafted() {
+    let blocks = &three("Truth holds.")[..1];
+    let mut models = Model::for_blocks(blocks);
+    let mut checker = ScriptedChecker::new(vec![CheckStep::Error("failed Lean"); 2]);
+    let mut engine = engine_with(0);
+    engine.on_change(&render(blocks, "", ""), None, 0).unwrap();
+    assert_eq!(status(&engine.view(), 1), BlockStatus::NotFormalized);
+    assert!(engine.view().blocks[0].needs_rerun);
+    engine
+        .run_next(
+            &mut PipelineRunner::new(&mut models, &mut checker, config()),
+            1000,
+        )
+        .unwrap();
+    assert!(engine.dirty().is_empty());
+    assert_eq!(status(&engine.view(), 1), BlockStatus::FormalizationError);
+    assert!(!engine.view().blocks[0].needs_rerun);
+    assert!(engine.retry(id(1), 2000));
+    let view = engine.view();
+    assert_eq!(status(&view, 1), BlockStatus::SirDrafted);
+    assert!(view.blocks[0].needs_rerun);
+    assert!(view.blocks[0].lean_statement.is_none());
+    assert!(view.blocks[0].checks.is_empty());
 }

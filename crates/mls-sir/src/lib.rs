@@ -65,6 +65,112 @@ pub struct Sir {
     assumptions_made: Vec<String>,
 }
 
+/// A bounded semi-formal proof outline for a human-confirmed statement.
+///
+/// This representation records explanatory steps and dependencies. It does not establish that
+/// the proof is valid; only the Lean checker can do that.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ProofSir {
+    /// Ordered, concise steps describing the proof strategy.
+    pub steps: Vec<String>,
+    /// Referenced declarations or prior results.
+    pub uses: Vec<String>,
+    /// Explicit assumptions introduced by the proof outline.
+    pub assumptions_made: Vec<String>,
+}
+
+/// Maximum number of proof outline steps or referenced declarations.
+pub const MAX_PROOF_SIR_ITEMS: usize = 128;
+/// Maximum UTF-8 byte length of one proof outline item.
+pub const MAX_PROOF_SIR_ITEM_BYTES: usize = 4_096;
+
+impl ProofSir {
+    /// Validate a proof outline and its size bounds.
+    pub fn try_new(
+        steps: Vec<String>,
+        uses: Vec<String>,
+        assumptions_made: Vec<String>,
+    ) -> Result<Self, String> {
+        let sir = Self {
+            steps,
+            uses,
+            assumptions_made,
+        };
+        for (field, values) in [
+            ("steps", &sir.steps),
+            ("uses", &sir.uses),
+            ("assumptions_made", &sir.assumptions_made),
+        ] {
+            if values.len() > MAX_PROOF_SIR_ITEMS {
+                return Err(format!("{field} exceeds {MAX_PROOF_SIR_ITEMS} items"));
+            }
+            for (index, value) in values.iter().enumerate() {
+                if value.trim().is_empty() {
+                    return Err(format!("{field}[{index}] must contain non-whitespace text"));
+                }
+                if value.len() > MAX_PROOF_SIR_ITEM_BYTES {
+                    return Err(format!(
+                        "{field}[{index}] exceeds {MAX_PROOF_SIR_ITEM_BYTES} bytes"
+                    ));
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        for (index, value) in sir.uses.iter().enumerate() {
+            if !seen.insert(value) {
+                return Err(format!("uses[{index}] duplicates a referenced declaration"));
+            }
+        }
+        Ok(sir)
+    }
+
+    /// Parse and validate a proof SIR JSON document.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        let sir: Self = serde_json::from_str(json)?;
+        Self::try_new(sir.steps, sir.uses, sir.assumptions_made).map_err(de::Error::custom)
+    }
+
+    /// JSON Schema for structured proof outline generation.
+    #[must_use]
+    pub fn json_schema() -> Value {
+        let string_list = |unique: bool| {
+            serde_json::json!({
+                "type": "array",
+                "maxItems": MAX_PROOF_SIR_ITEMS,
+                "items": {"type": "string", "minLength": 1, "maxLength": MAX_PROOF_SIR_ITEM_BYTES},
+                "uniqueItems": unique
+            })
+        };
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["steps", "uses", "assumptions_made"],
+            "properties": {
+                "steps": string_list(false),
+                "uses": string_list(true),
+                "assumptions_made": string_list(false)
+            }
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ProofSir {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawProofSir {
+            steps: Vec<String>,
+            uses: Vec<String>,
+            assumptions_made: Vec<String>,
+        }
+        let raw = RawProofSir::deserialize(deserializer)?;
+        Self::try_new(raw.steps, raw.uses, raw.assumptions_made).map_err(de::Error::custom)
+    }
+}
+
 impl<'de> Deserialize<'de> for Sir {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -421,6 +527,52 @@ mod tests {
 
     fn fixture() -> Sir {
         Sir::from_json(FIXTURE).expect("fixture must be valid")
+    }
+
+    #[test]
+    fn proof_sir_validates_wire_data_and_exposes_bounded_schema() {
+        let valid =
+            r#"{"steps":["apply the definition"],"uses":["def:continuous"],"assumptions_made":[]}"#;
+        let proof = ProofSir::from_json(valid).unwrap();
+        assert_eq!(
+            serde_json::to_value(&proof).unwrap(),
+            serde_json::from_str::<Value>(valid).unwrap()
+        );
+        assert!(ProofSir::from_json(r#"{"steps":[" "],"uses":[],"assumptions_made":[]}"#).is_err());
+        assert!(
+            ProofSir::from_json(r#"{"steps":[],"uses":["x","x"],"assumptions_made":[]}"#).is_err()
+        );
+        assert!(
+            ProofSir::from_json(r#"{"steps":[],"uses":[],"assumptions_made":[],"extra":true}"#)
+                .is_err()
+        );
+
+        let schema = ProofSir::json_schema();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["steps"]["maxItems"],
+            MAX_PROOF_SIR_ITEMS
+        );
+        assert_eq!(
+            schema["properties"]["steps"]["items"]["maxLength"],
+            MAX_PROOF_SIR_ITEM_BYTES
+        );
+    }
+
+    #[test]
+    fn proof_sir_constructor_enforces_item_and_length_bounds() {
+        assert!(
+            ProofSir::try_new(vec!["step".into(); MAX_PROOF_SIR_ITEMS + 1], vec![], vec![],)
+                .is_err()
+        );
+        assert!(
+            ProofSir::try_new(
+                vec!["x".repeat(MAX_PROOF_SIR_ITEM_BYTES + 1)],
+                vec![],
+                vec![],
+            )
+            .is_err()
+        );
     }
 
     #[test]

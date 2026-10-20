@@ -158,8 +158,7 @@ fn review_run(arguments: &[OsString], output: &mut Option<PathBuf>) -> Result<()
     let mut checker = LeanStatementChecker::new(&mut worker);
     let pipeline = PipelineConfig {
         max_attempts,
-        sir_max_tokens: models.default_max_tokens,
-        lean_max_tokens: models.default_max_tokens,
+        formalization_max_tokens: models.default_max_tokens,
     };
     let (report, persistence) = match transport {
         Transport::Replay(mut client) => (
@@ -561,6 +560,17 @@ fn persist_store(document: &Path, store: &ReviewStore) -> Result<(), Box<dyn std
     let (_, store_path) = review_paths(document);
     ensure_owned_dir(&review_directory(document))?;
     atomic_replace_owned(&store_path, store.to_json().as_bytes())
+}
+
+// The daemon uses exactly the same decision store as the review commands. Keep Refusal private
+// to this command's exit-code protocol.
+pub(super) fn serve_load_store(document: &Path) -> Result<ReviewStore, String> {
+    preflight_review(document).map_err(|error| error.to_string())?;
+    load_store(document).map_err(|error| error.message)
+}
+
+pub(super) fn serve_persist_store(document: &Path, store: &ReviewStore) -> Result<(), String> {
+    persist_store(document, store).map_err(|error| error.to_string())
 }
 
 /// Caches the Lean declaration accepted for a block's SIR, under the report's section 4 key, when

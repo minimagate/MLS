@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,58 @@ DEFAULT_CASES = ROOT / "evals" / "cases.json"
 DEFAULT_SOURCE = ROOT / "evals" / "statements.tm"
 DEFAULT_RESULTS = ROOT / "evals" / "results"
 BLOCKED_DEPENDENCY = "a formal statement dependency was not accepted speculatively"
+FAILURE_TAXONOMY_VERSION = "mls-m2-failure-categories-v1"
+# Order is also the deterministic precedence when a report has several signals.
+FAILURE_CATEGORIES = (
+    "sir_wrong",
+    "structure_check_mismatch",
+    "unknown_or_wrong_mathlib_name",
+    "type_error",
+    "other",
+)
+
+
+def failure_category(block: Mapping[str, Any]) -> str:
+    """Classify final report evidence, never reference-SIR wording or guessed semantics.
+
+    Name errors are Lean name-resolution diagnostics; the intended Mathlib symbol
+    is not independently known. SIR wrong requires an explicit contract/rejection
+    error. Missing SIRs, provider failures and unsupported admission syntax alone
+    do not establish that a SIR is wrong.
+    """
+    errors = [error for error in block.get("errors", []) if isinstance(error, str)]
+    sir_errors = {
+        "SIR kind differs from tagged source kind",
+        "SIR label differs from source label",
+        "SIR uses differ from deterministically linked dependency labels",
+        "the regenerated SIR equals the rejected SIR",
+    }
+    if any(error in sir_errors or re.fullmatch(
+        r"SIR variable (?:name .+ cannot be preserved as a generated Lean binder"
+        r"|h\d+ conflicts with the canonical hypothesis binder)", error
+    ) for error in errors):
+        return "sir_wrong"
+    if any(check.get("hard") and check.get("state") == "mismatch"
+           and check.get("scope", "structure") == "structure"
+           for check in block.get("checks", [])):
+        return "structure_check_mismatch"
+
+    # Structured diagnostics are authoritative. Older reports also retain the
+    # diagnostic in a Lean-prefixed error; unrelated provider/source prose is excluded.
+    diagnostics = [item["message"] for item in block.get("lean_diagnostics", [])
+                   if isinstance(item, dict) and isinstance(item.get("message"), str)]
+    diagnostics.extend(error.removeprefix("Lean:").strip()
+                       for error in errors if error.startswith("Lean:"))
+    location = r"(?:^|\n)\s*(?:line \d+, column \d+:\s*)?"
+    if any(re.search(location + r"(?:unknown (?:constant|identifier|namespace)\b"
+                     r"|invalid field\b)", message, re.IGNORECASE)
+           for message in diagnostics):
+        return "unknown_or_wrong_mathlib_name"
+    if any(re.search(location + r"(?:type mismatch\b|application (?:argument )?type mismatch\b"
+                     r"|function expected\b|failed to synthesize\b)", message, re.IGNORECASE)
+           for message in diagnostics):
+        return "type_error"
+    return "other"
 
 
 def canonical_json(value: Any) -> str:
@@ -148,6 +201,7 @@ def summarize(corpus: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str,
         for block in mapped_blocks
     )
     failures = []
+    category_counts = dict.fromkeys(FAILURE_CATEGORIES, 0)
     blocked = 0
     for block in mapped_blocks:
         if block.get("accepted_speculatively"):
@@ -155,11 +209,14 @@ def summarize(corpus: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str,
         errors = list(block.get("errors", []))
         is_blocked = any(BLOCKED_DEPENDENCY in str(error) for error in errors)
         blocked += int(is_blocked)
+        category = failure_category(block)
+        category_counts[category] += 1
         failures.append({
             "block_id": block.get("block_id"),
             "label": block.get("label"),
             "status": block.get("status"),
             "blocked_dependency": is_blocked,
+            "category": category,
             "errors": errors,
         })
 
@@ -185,6 +242,13 @@ def summarize(corpus: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str,
                 "an unconfirmed draft."
             ),
             "structure_denominator": "Cases whose candidate Lean statement elaborated.",
+            "failure_categories": (
+                "One category per nonaccepted mapped case, using final report evidence. "
+                "Precedence: SIR contract/rejection error, hard structure mismatch, Lean name "
+                "resolution, Lean type error, other. Name resolution does not establish which "
+                "Mathlib name was intended. Exact reference-SIR inequality is not SIR wrong; "
+                "semantic faithfulness still requires independent review."
+            ),
         },
         "source_case_count": len(cases),
         "report_block_count": len(blocks),
@@ -211,9 +275,11 @@ def summarize(corpus: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str,
         },
         "accepted_unconfirmed": ratio(accepted, len(cases)),
         "failures": {
+            "taxonomy_version": FAILURE_TAXONOMY_VERSION,
             "count": len(failures),
             "denominator": len(cases),
             "blocked_dependency_count": blocked,
+            "category_counts": category_counts,
             "cases": failures,
         },
         "diagnostics": report.get("diagnostics", []),

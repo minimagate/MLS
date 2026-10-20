@@ -155,12 +155,12 @@
     }
   ],
   "usage": {
-    "calls": 4,
-    "input_tokens": 40,
-    "output_tokens": 20,
+    "calls": 2,
+    "input_tokens": 20,
+    "output_tokens": 10,
     "unknown_input_token_calls": 0,
     "unknown_output_token_calls": 0,
-    "known_cost": 0.04,
+    "known_cost": 0.02,
     "unknown_cost_calls": 0
   }
 }

@@ -4,27 +4,43 @@
   "block_id": "block-1",
   "attempt": 0,
   "request": {
-    "context": { "attempt": 0, "block_id": "block-1" },
+    "context": {
+      "attempt": 0,
+      "block_id": "block-1"
+    },
     "endpoint": "/api/v1/chat/completions",
     "max_tokens": 32,
-    "messages": [{ "content": "Return a tiny object.", "role": "user" }],
+    "messages": [
+      {
+        "content": "Return a tiny object.",
+        "role": "user"
+      }
+    ],
     "model": "anthropic/claude-sonnet-5",
-    "provider": { "require_parameters": true },
+    "provider": {
+      "require_parameters": true
+    },
     "response_format": {
-      "name": "mls_statement_sir",
+      "name": "mls_formalization",
       "strict": true,
       "type": "json_schema"
     },
     "schema": {
       "additionalProperties": false,
-      "properties": { "answer": { "type": "string" } },
-      "required": ["answer"],
+      "properties": {
+        "answer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "answer"
+      ],
       "type": "object"
     },
     "schema_version": "test-v1",
-    "stage": "sir"
+    "stage": "formalization"
   },
-  "request_hash": "00921c96838c6144a0cbbabb60d78b693eb5d29868f526b0fc3127cb6488b2b0",
+  "request_hash": "eecd9004b9017c9cfaeb378be5b4b72a00d703f86c365f366d0c549d0f01e468",
   "configured_model": "anthropic/claude-sonnet-5",
   "resolved_model": "anthropic/claude-sonnet-5-20261001",
   "usage": {
@@ -35,7 +51,9 @@
   },
   "elapsed_ms": 7,
   "response_status": 200,
-  "provider_response": {"synthetic": true},
+  "provider_response": {
+    "synthetic": true
+  },
   "response": {
     "finish_reason": "stop",
     "metadata": {
@@ -51,9 +69,13 @@
         "output_tokens": 2,
         "total_tokens": 3
       },
-      "provider_response": {"synthetic": true}
+      "provider_response": {
+        "synthetic": true
+      }
     },
-    "output": { "answer": "recorded" }
+    "output": {
+      "answer": "recorded"
+    }
   },
   "error": null,
   "provenance": "synthetic"

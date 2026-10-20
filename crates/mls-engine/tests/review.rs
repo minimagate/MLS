@@ -10,7 +10,7 @@ use mls_engine::{
     ReviewStore, ReviewView, badge, lacks_persisted_ids, review_view, run_batch_analyzed,
     run_batch_reviewed,
 };
-use mls_models::{GenerationReply, GenerationStage, ModelError};
+use mls_models::{GenerationReply, ModelError};
 use mls_sir::{Sir, StatementKind};
 use mls_tm::{Analysis, analyze, parse};
 use serde_json::{Value, json};
@@ -85,22 +85,23 @@ fn scripted(replies: Vec<GenerationReply>) -> CapturingClient {
     CapturingClient {
         replies: replies.into_iter().map(Ok).collect(),
         requests: Vec::new(),
+        last_sir: None,
     }
 }
 
-fn sir_calls(models: &CapturingClient) -> usize {
+fn initial_calls(models: &CapturingClient) -> usize {
     models
         .requests
         .iter()
-        .filter(|request| request.stage == GenerationStage::Sir)
+        .filter(|request| request.context.attempt == 0)
         .count()
 }
 
-fn lean_calls(models: &CapturingClient) -> usize {
+fn repair_calls(models: &CapturingClient) -> usize {
     models
         .requests
         .iter()
-        .filter(|request| request.stage != GenerationStage::Sir)
+        .filter(|request| request.context.attempt > 0)
         .count()
 }
 
@@ -195,15 +196,17 @@ fn confirmed_block_skips_sir_and_its_cached_lean_skips_generation() {
     confirm(&mut store, &source, &first, 1);
 
     // Confirmed, text unchanged: the SIR is not requested again, but Lean is generated once.
-    let mut second_models = scripted(vec![lean_for(1)]);
+    let mut second_models = scripted(vec![
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
     let mut second_checker = ScriptedChecker::new([ok(1)]);
     let second = run(&source, &mut second_models, &mut second_checker, &store);
     let confirmed = report(&second, 1);
     assert_eq!(confirmed.status, BlockStatus::StatementConfirmed);
     assert_eq!(confirmed.sir_origin.as_deref(), Some("confirmed"));
     assert_eq!(confirmed.lean_origin.as_deref(), Some("generated"));
-    assert_eq!(sir_calls(&second_models), 0);
-    assert_eq!(lean_calls(&second_models), 1);
+    assert_eq!(second_models.requests.len(), 1);
     cache_lean(&mut store, &second, 1);
 
     // With the cached declaration, neither the SIR nor Lean is requested from the model.
@@ -223,6 +226,72 @@ fn confirmed_block_skips_sir_and_its_cached_lean_skips_generation() {
 }
 
 #[test]
+fn identity_mismatch_is_repaired_with_the_next_combined_formalization() {
+    let source = single("Truth holds.");
+    let mut models = scripted(vec![
+        sir(1, "theorem", "thm:wrong", vec![], "truth"),
+        lean_for(1),
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
+    let mut checker = ScriptedChecker::new([ok(1)]);
+    let batch = run(&source, &mut models, &mut checker, &ReviewStore::new());
+    let block_report = report(&batch, 1);
+
+    assert_eq!(block_report.status, BlockStatus::SirDrafted);
+    assert_eq!(
+        block_report.sir.as_ref().unwrap().label(),
+        Some("thm:first")
+    );
+    assert!(block_report.errors.is_empty());
+    assert_eq!(block_report.attempts, 2);
+    assert_eq!(models.requests.len(), 2);
+    assert_eq!(models.requests[1].context.attempt, 1);
+    assert!(prompt(&models, 1).contains("SIR label differs from source label"));
+    assert_eq!(
+        checker.checked_sources,
+        [lean_for(1).output["lean_statement"]
+            .as_str()
+            .unwrap()
+            .to_owned()]
+    );
+    assert_eq!(checker.finishes, [true]);
+}
+
+#[test]
+fn pinned_confirmation_requires_the_returned_sir_to_match_before_checking_lean() {
+    let source = single("Truth holds.");
+    let mut store = ReviewStore::new();
+    let mut first_models = scripted(vec![
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
+    let mut first_checker = ScriptedChecker::new([ok(1)]);
+    let first = run(&source, &mut first_models, &mut first_checker, &store);
+    confirm(&mut store, &source, &first, 1);
+
+    let mut models = scripted(vec![
+        sir(1, "theorem", "thm:first", vec![], "different claim"),
+        lean_for(1),
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
+    let mut checker = ScriptedChecker::new([ok(1)]);
+    let batch = run(&source, &mut models, &mut checker, &store);
+    let block_report = report(&batch, 1);
+
+    assert_eq!(block_report.status, BlockStatus::StatementConfirmed);
+    assert_eq!(block_report.sir.as_ref().unwrap().conclusion(), "truth");
+    assert_eq!(block_report.attempts, 2);
+    assert_eq!(models.requests.len(), 2);
+    assert_eq!(models.requests[1].context.attempt, 1);
+    assert!(prompt(&models, 1).contains("returned SIR differs"));
+    assert_eq!(checker.checked_sources.len(), 1);
+    assert!(checker.checked_sources[0].contains(": True := by sorry"));
+    assert_eq!(checker.finishes, [true]);
+}
+
+#[test]
 fn a_cached_declaration_that_fails_to_check_falls_back_to_generation() {
     let source = single("Truth holds.");
     let mut store = ReviewStore::new();
@@ -235,7 +304,10 @@ fn a_cached_declaration_that_fails_to_check_falls_back_to_generation() {
     confirm(&mut store, &source, &first, 1);
     cache_lean(&mut store, &first, 1);
 
-    let mut models = scripted(vec![lean_for(1)]);
+    let mut models = scripted(vec![
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
     let mut checker = ScriptedChecker::new([CheckStep::Error("environment changed"), ok(1)]);
     let batch = run(&source, &mut models, &mut checker, &store);
     let block_report = report(&batch, 1);
@@ -243,7 +315,7 @@ fn a_cached_declaration_that_fails_to_check_falls_back_to_generation() {
     assert_eq!(block_report.lean_origin.as_deref(), Some("generated"));
     assert_eq!(block_report.attempts, 1);
     assert_eq!(checker.checked_sources.len(), 2);
-    assert_eq!(sir_calls(&models), 0);
+    assert_eq!(models.requests.len(), 1);
 }
 
 #[test]
@@ -257,7 +329,10 @@ fn cosmetic_edit_keeps_the_confirmation_and_reuses_the_cached_lean() {
     let mut first_checker = ScriptedChecker::new([ok(1)]);
     let first = run(&source, &mut first_models, &mut first_checker, &store);
     confirm(&mut store, &source, &first, 1);
-    let mut second_models = scripted(vec![lean_for(1)]);
+    let mut second_models = scripted(vec![
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
     let mut second_checker = ScriptedChecker::new([ok(1)]);
     let second = run(&source, &mut second_models, &mut second_checker, &store);
     cache_lean(&mut store, &second, 1);
@@ -272,9 +347,11 @@ fn cosmetic_edit_keeps_the_confirmation_and_reuses_the_cached_lean() {
     assert!(block_report.cosmetic_reconfirmation);
     assert_eq!(block_report.sir_origin.as_deref(), Some("confirmed"));
     assert!(block_report.superseded_confirmation.is_none());
-    assert_eq!(sir_calls(&models), 1);
-    assert_eq!(lean_calls(&models), 0);
+    assert_eq!(models.requests.len(), 1);
     assert_eq!(block_report.lean_origin.as_deref(), Some("cache"));
+    assert!(!block_report.checks.is_empty());
+    assert_eq!(checker.checked_sources.len(), 1);
+    assert_eq!(checker.finishes, [true]);
 }
 
 #[test]
@@ -288,7 +365,10 @@ fn layout_only_resave_keeps_the_confirmation_and_the_cache_without_a_model_call(
     let mut first_checker = ScriptedChecker::new([ok(1)]);
     let first = run(&source, &mut first_models, &mut first_checker, &store);
     confirm(&mut store, &source, &first, 1);
-    let mut second_models = scripted(vec![lean_for(1)]);
+    let mut second_models = scripted(vec![
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
     let mut second_checker = ScriptedChecker::new([ok(1)]);
     let second = run(&source, &mut second_models, &mut second_checker, &store);
     cache_lean(&mut store, &second, 1);
@@ -302,8 +382,8 @@ fn layout_only_resave_keeps_the_confirmation_and_the_cache_without_a_model_call(
     assert_eq!(block_report.status, BlockStatus::StatementConfirmed);
     assert!(!block_report.cosmetic_reconfirmation);
     assert_eq!(block_report.sir_origin.as_deref(), Some("confirmed"));
-    assert_eq!(sir_calls(&models), 0);
-    assert_eq!(lean_calls(&models), 0);
+    assert_eq!(initial_calls(&models), 0);
+    assert_eq!(repair_calls(&models), 0);
     assert_eq!(block_report.lean_origin.as_deref(), Some("cache"));
 }
 
@@ -336,7 +416,7 @@ fn semantic_change_supersedes_the_confirmation_and_needs_review_again() {
         block_report.sir.as_ref().unwrap().conclusion(),
         "truth and more"
     );
-    assert_eq!(lean_calls(&models), 1);
+    assert_eq!(models.requests.len(), 1);
 }
 
 #[test]
@@ -369,7 +449,7 @@ fn rejected_sir_is_shown_to_the_next_generation() {
         "{}",
         prompt(&models, 0)
     );
-    assert!(prompt(&models, 0).contains("REVIEW NOTE"));
+    assert!(prompt(&models, 0).contains("REJECTED SIR"));
 }
 
 #[test]
@@ -489,6 +569,13 @@ fn valid_edit_is_pinned_and_used_without_a_sir_call() {
     let mut models = scripted(vec![
         sir(1, "theorem", "thm:first", vec![], "truth"),
         lean_for(1),
+        sir(
+            2,
+            "theorem",
+            "thm:second",
+            vec!["thm:first"],
+            "edited truth",
+        ),
         lean_for(2),
     ]);
     let mut checker = ScriptedChecker::new([ok(1), ok(2)]);
@@ -497,8 +584,8 @@ fn valid_edit_is_pinned_and_used_without_a_sir_call() {
     let edited_report = report(&batch, 2);
     assert_eq!(edited_report.status, BlockStatus::SirDrafted);
     assert_eq!(edited_report.sir_origin.as_deref(), Some("edited"));
-    assert_eq!(sir_calls(&models), 1);
-    assert!(prompt(&models, 2).contains("edited truth"));
+    assert_eq!(models.requests.len(), 2);
+    assert!(prompt(&models, 1).contains("edited truth"));
 
     // Confirming the dependency settles both blocks in the view, without another run.
     confirm(&mut store, &source, &batch, 1);
@@ -543,6 +630,7 @@ fn changed_dependency_sir_changes_the_cache_key_and_regenerates_lean() {
     let mut models = scripted(vec![
         sir(1, "theorem", "thm:first", vec![], "falsity"),
         lean_for(1),
+        sir(2, "theorem", "thm:second", vec!["thm:first"], "truth"),
         lean_for(2),
     ]);
     let mut checker = ScriptedChecker::new([ok(1), ok(2)]);
@@ -554,8 +642,7 @@ fn changed_dependency_sir_changes_the_cache_key_and_regenerates_lean() {
     assert_eq!(dependent.sir_origin.as_deref(), Some("confirmed"));
     assert_eq!(dependent.lean_origin.as_deref(), Some("generated"));
     assert_ne!(dependent.cache_key, original_key);
-    assert_eq!(sir_calls(&models), 1);
-    assert_eq!(lean_calls(&models), 2);
+    assert_eq!(models.requests.len(), 2);
     let view = review_view(DOCUMENT, &analysis_of(&v2), &batch, &store);
     let waiting = view_block(&view, 2);
     assert_eq!(waiting.status, BlockStatus::SirDrafted);
@@ -598,7 +685,10 @@ fn confirm_refuses_stale_foreign_and_unusable_reports() {
     assert_eq!(store, ReviewStore::new());
 
     // An identity failure keeps the SIR for review but is not usable, so it cannot be confirmed.
-    let mut wrong_label = scripted(vec![sir(1, "theorem", "thm:wrong", vec![], "truth")]);
+    let mut wrong_label = scripted(vec![
+        sir(1, "theorem", "thm:wrong", vec![], "truth"),
+        sir(1, "theorem", "thm:wrong", vec![], "truth"),
+    ]);
     let mut no_checks = ScriptedChecker::new([]);
     let unusable = run(&v1, &mut wrong_label, &mut no_checks, &ReviewStore::new());
     assert_eq!(report(&unusable, 1).status, BlockStatus::NotFormalized);
@@ -725,14 +815,21 @@ fn without_a_store_entry_no_block_is_ever_statement_confirmed() {
             "sir call fails",
             (
                 two_blocks("Truth holds."),
-                vec![Err(ModelError::Transport("outage".into()))],
+                vec![
+                    Err(ModelError::Transport("outage".into())),
+                    Err(ModelError::Transport("outage retry".into())),
+                ],
                 vec![],
             ),
             vec![BlockStatus::NotFormalized, BlockStatus::NotFormalized],
         ),
         (
             "identity mismatch",
-            (single("Truth holds."), vec![Ok(wrong_label)], vec![]),
+            (
+                single("Truth holds."),
+                vec![Ok(wrong_label.clone()), Ok(wrong_label)],
+                vec![],
+            ),
             vec![BlockStatus::NotFormalized],
         ),
     ];
@@ -741,6 +838,7 @@ fn without_a_store_entry_no_block_is_ever_statement_confirmed() {
         let mut models = CapturingClient {
             replies: VecDeque::from(replies),
             requests: Vec::new(),
+            last_sir: None,
         };
         let mut checker = ScriptedChecker::new(steps);
         let batch = run(&source, &mut models, &mut checker, &ReviewStore::new());
@@ -956,7 +1054,10 @@ fn a_changed_block_is_downgraded_and_needs_a_rerun() {
     confirm(&mut store, &source, &first, 1);
     let batch = run(
         &source,
-        &mut scripted(vec![lean_for(1)]),
+        &mut scripted(vec![
+            sir(1, "theorem", "thm:first", vec![], "truth"),
+            lean_for(1),
+        ]),
         &mut ScriptedChecker::new([ok(1)]),
         &store,
     );
@@ -1025,7 +1126,10 @@ fn a_cosmetic_reconfirmation_is_anchored_to_the_reworded_block() {
         &store,
     );
     confirm(&mut store, &source, &first, 1);
-    let mut second_models = scripted(vec![lean_for(1)]);
+    let mut second_models = scripted(vec![
+        sir(1, "theorem", "thm:first", vec![], "truth"),
+        lean_for(1),
+    ]);
     let second = run(
         &source,
         &mut second_models,
@@ -1096,6 +1200,7 @@ fn a_confirmed_block_waits_for_an_unconfirmed_dependency_until_it_is_confirmed()
     let mut models = scripted(vec![
         sir(1, "theorem", "thm:first", vec![], "truth"),
         lean_for(1),
+        sir(2, "theorem", "thm:second", vec!["thm:first"], "truth"),
         lean_for(2),
     ]);
     let mut checker = ScriptedChecker::new([ok(1), ok(2)]);
@@ -1105,8 +1210,7 @@ fn a_confirmed_block_waits_for_an_unconfirmed_dependency_until_it_is_confirmed()
     assert_eq!(waiting.status, BlockStatus::SirDrafted);
     assert_eq!(waiting.sir_origin.as_deref(), Some("confirmed"));
     assert!(waiting.accepted_speculatively);
-    assert_eq!(sir_calls(&models), 1);
-    assert_eq!(lean_calls(&models), 2);
+    assert_eq!(models.requests.len(), 2);
 
     let view = review_view(DOCUMENT, &analysis, &batch, &store);
     let second = view_block(&view, 2);
@@ -1329,6 +1433,7 @@ fn a_cosmetic_reconfirmation_that_fails_identity_is_not_re_anchored() {
     let mut models = scripted(vec![
         sir(1, "theorem", "thm:alpha", vec![], "truth"),
         lean_for(1),
+        sir(2, "theorem", "thm:second", vec!["thm:first"], "truth"),
         sir(2, "theorem", "thm:second", vec!["thm:first"], "truth"),
     ]);
     let mut checker = ScriptedChecker::new([ok(1)]);
@@ -1625,6 +1730,7 @@ fn identity_results_are_compared_with_the_last_run() {
         &mut scripted(vec![
             sir(1, "theorem", "thm:alpha", vec![], "truth"),
             lean_for(1),
+            sir(2, "theorem", "thm:second", vec!["thm:first"], "truth"),
             sir(2, "theorem", "thm:second", vec!["thm:first"], "truth"),
         ]),
         &mut ScriptedChecker::new([ok(1)]),
