@@ -142,6 +142,8 @@ impl<M: ModelClient, C: StatementChecker> JobRunner for PipelineRunner<'_, M, C>
                 cached_sir: context.sir_candidate.as_ref(),
                 lean_lookup: &lookup,
                 reuse_generated_lean: true,
+                initial_premises: None,
+                repair_premises: None,
             },
         );
         JobOutcome::Completed(Box::new(JobResult {

@@ -461,6 +461,8 @@ pub fn run_batch_reviewed(
                 cached_sir: None,
                 lean_lookup: &reusable,
                 reuse_generated_lean: false,
+                initial_premises: None,
+                repair_premises: None,
             },
         );
         if let Some(dependency) = output.accepted {
@@ -498,6 +500,11 @@ pub(crate) struct BlockInput<'a> {
     pub lean_lookup: &'a dyn Fn(&str) -> Option<String>,
     /// Whether a declaration found for a generated SIR may be reused. Confirmed SIRs always may.
     pub reuse_generated_lean: bool,
+    /// Already-rendered top-10 Mathlib premises for initial Lean generation, if available.
+    /// This is prompt context only; it never affects SIR generation, checks or cache keys.
+    pub initial_premises: Option<&'a str>,
+    /// Already-rendered top-20 Mathlib premises for every Lean repair attempt, if available.
+    pub repair_premises: Option<&'a str>,
 }
 
 /// The result of formalizing one block.
@@ -630,6 +637,11 @@ pub(crate) fn formalize_block(
                     feedback: &feedback,
                     dependencies: &dependency_refs,
                     max_tokens: config.lean_max_tokens,
+                    premises: if attempt == 0 {
+                        input.initial_premises
+                    } else {
+                        input.repair_premises
+                    },
                 },
                 usage,
             ) {
@@ -1032,6 +1044,7 @@ struct LeanGeneration<'a> {
     feedback: &'a [String],
     dependencies: &'a [&'a AcceptedDependency],
     max_tokens: u32,
+    premises: Option<&'a str>,
 }
 
 fn generate_lean(
@@ -1047,6 +1060,7 @@ fn generate_lean(
         feedback,
         dependencies,
         max_tokens,
+        premises,
     } = generation;
     let kind = if sir.kind() == StatementKind::Definition {
         "definition"
@@ -1078,6 +1092,17 @@ fn generate_lean(
             })
         })
         .collect::<Vec<_>>();
+    let mut user_content = format!(
+        "SIR:\n{}\n\nACCEPTED DEPENDENCIES (generated name, declaration, SIR):\n{}\n\nPREVIOUS ERRORS:\n{}",
+        serde_json::to_string_pretty(sir).expect("SIR serialization cannot fail"),
+        serde_json::to_string(&dependency_context).expect("dependency serialization cannot fail"),
+        feedback.join("\n")
+    );
+    if let Some(premises) = premises.filter(|text| !text.trim().is_empty()) {
+        user_content.push_str("\n\nRETRIEVED MATHLIB PREMISES:\n");
+        user_content.push_str(premises);
+        user_content.push_str("\nEND RETRIEVED MATHLIB PREMISES");
+    }
     let request = GenerationRequest {
         context: CallContext {
             block_id: block.id.to_string(),
@@ -1097,13 +1122,7 @@ fn generate_lean(
             },
             ChatMessage {
                 role: "user".into(),
-                content: format!(
-                    "SIR:\n{}\n\nACCEPTED DEPENDENCIES (generated name, declaration, SIR):\n{}\n\nPREVIOUS ERRORS:\n{}",
-                    serde_json::to_string_pretty(sir).expect("SIR serialization cannot fail"),
-                    serde_json::to_string(&dependency_context)
-                        .expect("dependency serialization cannot fail"),
-                    feedback.join("\n")
-                ),
+                content: user_content,
             },
         ],
         schema_version: LEAN_SCHEMA_VERSION.into(),
@@ -1893,6 +1912,172 @@ mod tests {
             source_start: 10,
             source_end: 20,
         }
+    }
+
+    struct PremisePromptModel {
+        replies: std::collections::VecDeque<GenerationReply>,
+        requests: Vec<GenerationRequest>,
+    }
+
+    impl ModelClient for PremisePromptModel {
+        fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError> {
+            self.requests.push(request.clone());
+            Ok(self.replies.pop_front().expect("recorded scripted reply"))
+        }
+
+        fn decide(&mut self, _: &DecisionRequest) -> Result<DecisionReply, ModelError> {
+            panic!("retrieved premises must not introduce decision calls")
+        }
+    }
+
+    struct PremisePromptChecker {
+        calls: usize,
+        finishes: Vec<bool>,
+    }
+
+    impl StatementChecker for PremisePromptChecker {
+        fn check(&mut self, id: BlockId, _: &str, _: &str) -> Result<ExtractedDeclaration, String> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Err("unknown identifier `MissingName`".into());
+            }
+            let mut value = extracted(Vec::new(), "True");
+            value.declaration = declaration_name(id);
+            Ok(value)
+        }
+
+        fn finish(&mut self, accept: bool) -> Result<(), String> {
+            self.finishes.push(accept);
+            Ok(())
+        }
+    }
+
+    fn premise_prompt_recordings() -> Vec<Value> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/recordings/pipeline/repair");
+        (0..3)
+            .map(|number| {
+                serde_json::from_slice(
+                    &std::fs::read(root.join(format!("call-{number:04}.json"))).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn run_premise_prompt_fixture(
+        initial_premises: Option<&str>,
+        repair_premises: Option<&str>,
+    ) -> (BlockOutput, Vec<GenerationRequest>, UsageSummary, Vec<bool>) {
+        let source = include_bytes!("../../../tests/fixtures/lean/pipeline/repair.tm");
+        let analysis = analyze(&parse(source).unwrap());
+        let block = &analysis.blocks[0];
+        let mut model = PremisePromptModel {
+            replies: premise_prompt_recordings()
+                .into_iter()
+                .map(|record| serde_json::from_value(record["response"].clone()).unwrap())
+                .collect(),
+            requests: Vec::new(),
+        };
+        let mut checker = PremisePromptChecker {
+            calls: 0,
+            finishes: Vec::new(),
+        };
+        let mut usage = UsageSummary::default();
+        let review = ReviewStore::new();
+        let lookup = |_: &str| None;
+        let output = formalize_block(
+            &mut model,
+            &mut checker,
+            PipelineConfig {
+                max_attempts: 2,
+                sir_max_tokens: 4096,
+                lean_max_tokens: 4096,
+            },
+            &mut usage,
+            BlockInput {
+                block,
+                canonical: analysis.canonical_text(block.id),
+                failed_dependency: false,
+                dependencies: &[],
+                expected_uses: &[],
+                review: &review,
+                cached_sir: None,
+                lean_lookup: &lookup,
+                reuse_generated_lean: false,
+                initial_premises,
+                repair_premises,
+            },
+        );
+        assert!(model.replies.is_empty());
+        (output, model.requests, usage, checker.finishes)
+    }
+
+    #[test]
+    fn absent_premises_keep_every_recorded_generation_request_byte_identical() {
+        let (_, requests, _, _) = run_premise_prompt_fixture(None, None);
+        for (actual, record) in requests.iter().zip(premise_prompt_recordings()) {
+            let mut expected = record["request"].clone();
+            for field in ["endpoint", "model", "provider", "response_format"] {
+                expected.as_object_mut().unwrap().remove(field);
+            }
+            let expected: GenerationRequest = serde_json::from_value(expected).unwrap();
+            assert_eq!(
+                serde_json::to_vec(actual).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+        let (_, empty, _, _) = run_premise_prompt_fixture(Some(""), Some(" \n\t"));
+        assert_eq!(
+            serde_json::to_vec(&requests).unwrap(),
+            serde_json::to_vec(&empty).unwrap()
+        );
+    }
+
+    #[test]
+    fn retrieved_premises_only_augment_the_selected_lean_prompt_and_keep_drafts_unconfirmed() {
+        let (baseline, baseline_requests, baseline_usage, baseline_finishes) =
+            run_premise_prompt_fixture(None, None);
+        let (output, requests, usage, finishes) = run_premise_prompt_fixture(
+            Some("INITIAL_TOP_10 : True\nFirst initial doc sentence."),
+            Some("REPAIR_TOP_20 : Nat\nFirst repair doc sentence."),
+        );
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].stage, GenerationStage::Sir);
+        assert_eq!(requests[1].stage, GenerationStage::LeanStatement);
+        assert_eq!(requests[2].stage, GenerationStage::LeanRepair);
+        assert_eq!(
+            serde_json::to_vec(&requests[0]).unwrap(),
+            serde_json::to_vec(&baseline_requests[0]).unwrap(),
+            "SIR generation receives no retrieved premises"
+        );
+        for (number, text) in [
+            (1, "INITIAL_TOP_10 : True\nFirst initial doc sentence."),
+            (2, "REPAIR_TOP_20 : Nat\nFirst repair doc sentence."),
+        ] {
+            let mut expected = baseline_requests[number].clone();
+            expected.messages[1].content.push_str(&format!(
+                "\n\nRETRIEVED MATHLIB PREMISES:\n{text}\nEND RETRIEVED MATHLIB PREMISES"
+            ));
+            assert_eq!(
+                serde_json::to_vec(&requests[number]).unwrap(),
+                serde_json::to_vec(&expected).unwrap(),
+                "only the selected Lean user message is augmented"
+            );
+        }
+        assert_eq!(output.report.status, BlockStatus::SirDrafted);
+        assert!(output.report.accepted_speculatively);
+        assert_eq!(output.report.attempts, 2);
+        assert_eq!(
+            serde_json::to_value(output.report).unwrap(),
+            serde_json::to_value(baseline.report).unwrap(),
+            "premises cannot change structural evidence, cache keys or status"
+        );
+        assert_eq!(finishes, baseline_finishes);
+        assert_eq!(
+            serde_json::to_value(usage).unwrap(),
+            serde_json::to_value(baseline_usage).unwrap()
+        );
     }
 
     #[test]
