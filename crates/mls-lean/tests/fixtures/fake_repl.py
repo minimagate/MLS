@@ -37,6 +37,12 @@ while True:
         break
     request = json.loads("".join(lines))
     command = request["cmd"]
+    if "trigger_transport_failure" in command and (
+        mode == "worker-timeout-validation"
+        or (mode == "worker-timeout-extraction" and "#mls_extract" in command)
+    ):
+        time.sleep(10)
+        sys.exit(0)
     env += 1
     messages = []
     if command.startswith("#mls_validate_source"):

@@ -12,6 +12,6 @@ pub use shadow::{
     generate_shadow_project, shadow_path_for_document,
 };
 pub use worker::{
-    Binder, CandidateEnvironment, CheckResult, ExtractedDeclaration, LeanWorker, StatementRequest,
-    Validation, WorkerError,
+    Binder, CandidateEnvironment, CheckResult, EnvSnapshot, ExtractedDeclaration, LeanWorker,
+    StatementRequest, Validation, WorkerError,
 };

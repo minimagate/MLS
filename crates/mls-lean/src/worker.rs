@@ -89,6 +89,18 @@ pub struct CandidateEnvironment {
     parent_environment: u64,
     generation: u64,
     worker_id: u64,
+    process_epoch: u64,
+}
+
+/// An opaque reference to an accepted environment of one worker's REPL process.
+///
+/// Snapshots can only be created by [`LeanWorker::snapshot`] and are valid only for the
+/// worker that created them and the REPL process that was live at that time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnvSnapshot {
+    environment: u64,
+    worker_id: u64,
+    process_epoch: u64,
 }
 
 /// A rejected check; the worker's committed environment remains unchanged.
@@ -97,6 +109,9 @@ pub enum WorkerError {
     /// Transport or outer REPL protocol failure.
     #[error(transparent)]
     Repl(#[from] ReplError),
+    /// A previous transport failure made the REPL unusable; call [`LeanWorker::restart`].
+    #[error("Lean REPL is unavailable after a transport failure; restart the worker")]
+    NeedsRestart,
     /// Lean emitted one or more error diagnostics.
     #[error("Lean rejected the request")]
     Diagnostics(Vec<ReplDiagnostic>),
@@ -114,6 +129,12 @@ pub enum WorkerError {
     /// The candidate was not produced from the worker's current accepted state.
     #[error("candidate environment is stale or belongs to another accepted snapshot")]
     StaleCandidate,
+    /// The snapshot was taken from a different worker.
+    #[error("snapshot belongs to another Lean worker")]
+    ForeignSnapshot,
+    /// The snapshot was taken before a REPL restart and its environment id is no longer meaningful.
+    #[error("snapshot was invalidated by a Lean REPL restart")]
+    StaleSnapshot,
     /// The requested declaration name is outside MLS's generated identifier subset.
     #[error("declaration name must match mls_[a-z0-9_]+")]
     InvalidDeclarationName,
@@ -121,69 +142,120 @@ pub enum WorkerError {
 
 /// A persistent initialized Lean worker with transactional snapshots.
 pub struct LeanWorker {
-    repl: ReplProcess,
+    repl: Option<ReplProcess>,
+    config: ReplConfig,
     base_environment: u64,
     accepted_environment: u64,
     generation: u64,
     worker_id: u64,
+    process_epoch: u64,
 }
 
 impl LeanWorker {
     /// Spawn the REPL and import the fixed trusted baseline exactly once.
     pub fn spawn(config: ReplConfig) -> Result<Self, WorkerError> {
-        let mut repl = ReplProcess::spawn(config)?;
-        let response = repl.request(&json!({
-            "cmd": "import Mathlib\nimport MlsExtract\nset_option autoImplicit false"
-        }))?;
-        let messages = messages(&response)?;
-        reject_errors(messages)?;
-        let environment = environment(&response)?;
+        let (repl, environment) = start_repl(config.clone())?;
         Ok(Self {
-            repl,
+            repl: Some(repl),
+            config,
             base_environment: environment,
             accepted_environment: environment,
             generation: 0,
             worker_id: NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed),
+            process_epoch: 0,
         })
     }
 
-    /// Return the last fully accepted environment snapshot.
+    /// Return the last fully accepted environment id, even if its process has failed.
     #[must_use]
     pub const fn accepted_environment(&self) -> u64 {
         self.accepted_environment
     }
 
-    /// Reset future checks to the import-only baseline.
+    /// Capture the currently accepted environment for a later [`LeanWorker::restore`].
+    /// A failed worker cannot restore this snapshot; restarting invalidates it.
+    #[must_use]
+    pub const fn snapshot(&self) -> EnvSnapshot {
+        EnvSnapshot {
+            environment: self.accepted_environment,
+            worker_id: self.worker_id,
+            process_epoch: self.process_epoch,
+        }
+    }
+
+    /// Make an earlier snapshot of this worker the accepted environment.
+    ///
+    /// Every candidate created before this call, from any other accepted environment, is
+    /// refused by [`LeanWorker::accept`].
+    pub fn restore(&mut self, snapshot: EnvSnapshot) -> Result<(), WorkerError> {
+        self.ensure_ready()?;
+        if snapshot.worker_id != self.worker_id {
+            return Err(WorkerError::ForeignSnapshot);
+        }
+        if snapshot.process_epoch != self.process_epoch {
+            return Err(WorkerError::StaleSnapshot);
+        }
+        self.set_accepted(snapshot.environment);
+        Ok(())
+    }
+
+    /// Reset future checks to the import-only baseline (a restore to the base snapshot).
     pub fn reset_to_base(&mut self) {
-        self.accepted_environment = self.base_environment;
-        self.generation = self.generation.wrapping_add(1);
+        self.set_accepted(self.base_environment);
+    }
+
+    /// Replace the REPL process with a fresh import-only baseline.
+    ///
+    /// Snapshots and candidates from the previous process become invalid. If the new process
+    /// cannot start, the worker keeps its previous process and accepted state (including an
+    /// unavailable state after a transport failure). The caller must replay accepted source
+    /// and replace its saved snapshots after a successful restart.
+    ///
+    /// The REPL retains all environments until restart. Compaction must be coordinated by
+    /// the caller: an automatic restart here would invalidate its incremental snapshots.
+    pub fn restart(&mut self) -> Result<(), WorkerError> {
+        let (repl, environment) = start_repl(self.config.clone())?;
+        self.repl = Some(repl);
+        self.base_environment = environment;
+        self.process_epoch = self.process_epoch.wrapping_add(1);
+        self.set_accepted(environment);
+        Ok(())
     }
 
     /// Commit a candidate after the caller has completed all mechanical SIR checks.
+    ///
+    /// Refuses candidates from another worker or REPL process, candidates whose parent is not
+    /// the current accepted environment, and candidates created before the last restore,
+    /// reset, or accepted environment change.
     pub fn accept(&mut self, candidate: CandidateEnvironment) -> Result<u64, WorkerError> {
+        self.ensure_ready()?;
         if candidate.parent_environment != self.accepted_environment
             || candidate.generation != self.generation
             || candidate.worker_id != self.worker_id
+            || candidate.process_epoch != self.process_epoch
         {
             return Err(WorkerError::StaleCandidate);
         }
-        self.accepted_environment = candidate.environment;
-        self.generation = self.generation.wrapping_add(1);
+        self.set_accepted(candidate.environment);
         Ok(self.accepted_environment)
     }
 
     /// Validate, elaborate, and extract one declaration without committing its snapshot.
+    ///
+    /// Transport failures make the worker unavailable until an explicit [`Self::restart`].
+    /// Lean diagnostics and rejected trusted payloads leave the accepted environment usable.
     pub fn check_statement(
         &mut self,
         request: StatementRequest<'_>,
     ) -> Result<CheckResult, WorkerError> {
+        self.ensure_ready()?;
         if request.source.contains('\0') {
             return Err(payload_error("validation", "NUL bytes are forbidden"));
         }
         if !valid_declaration_name(request.declaration_name) {
             return Err(WorkerError::InvalidDeclarationName);
         }
-        let validation_response = self.repl.request(&json!({
+        let validation_response = self.request(&json!({
             "env": self.accepted_environment,
             "cmd": format!("#mls_validate_source {} from_source {}", request.declaration_name, lean_string(request.source)),
         }))?;
@@ -208,9 +280,8 @@ impl LeanWorker {
             request.declaration_name,
             lean_string(request.source)
         );
-        let response = self
-            .repl
-            .request(&json!({ "env": self.accepted_environment, "cmd": command }))?;
+        let response =
+            self.request(&json!({ "env": self.accepted_environment, "cmd": command }))?;
         let response_messages = messages(&response)?;
         reject_errors(response_messages.clone())?;
         let extracted: ExtractedDeclaration =
@@ -227,6 +298,7 @@ impl LeanWorker {
             parent_environment: self.accepted_environment,
             generation: self.generation,
             worker_id: self.worker_id,
+            process_epoch: self.process_epoch,
         };
         Ok(CheckResult {
             candidate,
@@ -235,6 +307,43 @@ impl LeanWorker {
             messages: response_messages,
         })
     }
+
+    /// Move the accepted environment and invalidate every outstanding candidate.
+    fn set_accepted(&mut self, environment: u64) {
+        self.accepted_environment = environment;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn ensure_ready(&self) -> Result<(), WorkerError> {
+        self.repl.as_ref().ok_or(WorkerError::NeedsRestart)?;
+        Ok(())
+    }
+
+    /// A transport failure can leave the stream uncorrelated or the process dead. Drop it
+    /// immediately so subsequent operations report a stable error and cannot commit state.
+    fn request(&mut self, request: &Value) -> Result<Value, WorkerError> {
+        let result = self
+            .repl
+            .as_mut()
+            .ok_or(WorkerError::NeedsRestart)?
+            .request(request);
+        if result.is_err() {
+            self.repl = None;
+        }
+        result.map_err(WorkerError::Repl)
+    }
+}
+
+/// Spawn a REPL process and import the trusted baseline, returning the baseline environment.
+fn start_repl(config: ReplConfig) -> Result<(ReplProcess, u64), WorkerError> {
+    let mut repl = ReplProcess::spawn(config)?;
+    let response = repl.request(&json!({
+        "cmd": "import Mathlib\nimport MlsExtract\nset_option autoImplicit false"
+    }))?;
+    let messages = messages(&response)?;
+    reject_errors(messages)?;
+    let environment = environment(&response)?;
+    Ok((repl, environment))
 }
 
 fn valid_declaration_name(name: &str) -> bool {
@@ -315,4 +424,48 @@ fn lean_string(value: &str) -> String {
     }
     quoted.push('"');
     quoted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{path::PathBuf, time::Duration};
+
+    fn config() -> ReplConfig {
+        ReplConfig {
+            program: PathBuf::from("python3"),
+            args: vec![format!(
+                "{}/tests/fixtures/fake_repl.py",
+                env!("CARGO_MANIFEST_DIR")
+            )],
+            cwd: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            env: vec![("FAKE_REPL_MODE".into(), "worker".into())],
+            timeout: Duration::from_secs(5),
+            max_stdout_bytes: 1024,
+            max_stderr_bytes: 64,
+        }
+    }
+
+    #[test]
+    fn check_after_restore_builds_on_the_restored_parent() {
+        let mut worker = LeanWorker::spawn(config()).unwrap();
+        let base = worker.snapshot();
+        let first = worker
+            .check_statement(StatementRequest {
+                block_id: "00000000-0000-4000-8000-000000000001".parse().unwrap(),
+                declaration_name: "mls_demo",
+                source: "theorem mls_demo : True := by sorry",
+            })
+            .unwrap();
+        worker.accept(first.candidate).unwrap();
+        worker.restore(base).unwrap();
+        let second = worker
+            .check_statement(StatementRequest {
+                block_id: "00000000-0000-4000-8000-000000000002".parse().unwrap(),
+                declaration_name: "mls_demo",
+                source: "theorem mls_demo : True := by sorry",
+            })
+            .unwrap();
+        assert_eq!(second.candidate.parent_environment, base.environment);
+    }
 }

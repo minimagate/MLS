@@ -162,3 +162,87 @@ fn deriving_and_unsafe_identifiers_are_rejected_before_elaboration() {
         }
     }
 }
+
+fn probe(
+    worker: &mut LeanWorker,
+    block: u8,
+    name: &str,
+    reference: &str,
+) -> Result<(), WorkerError> {
+    worker
+        .check_statement(StatementRequest {
+            block_id: block_id(block),
+            declaration_name: name,
+            source: &format!("def {name} : True := {reference}"),
+        })
+        .map(|_| ())
+}
+
+fn assert_known(worker: &mut LeanWorker, block: u8, reference: &str) {
+    let name = format!("mls_probe_{block}");
+    probe(worker, block, &name, reference)
+        .unwrap_or_else(|error| panic!("{reference} should be known: {error}"));
+}
+
+fn assert_unknown(worker: &mut LeanWorker, block: u8, reference: &str) {
+    let name = format!("mls_probe_{block}");
+    match probe(worker, block, &name, reference) {
+        Err(WorkerError::Diagnostics(diagnostics)) => assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.data.contains(reference)),
+            "{reference}: unexpected diagnostics: {diagnostics:?}"
+        ),
+        Ok(()) => panic!("{reference} must be unknown in this environment"),
+        Err(other) => panic!("{reference}: expected Lean diagnostics, got {other}"),
+    }
+}
+
+#[test]
+fn restore_discards_later_branches_and_reaches_base() {
+    if !enabled() {
+        eprintln!("skipped: set MLS_LEAN_TESTS=1 to run the pinned local runtime");
+        return;
+    }
+    let mut worker = worker();
+    let base = worker.snapshot();
+
+    let a = worker
+        .check_statement(StatementRequest {
+            block_id: block_id(40),
+            declaration_name: "mls_a",
+            source: "theorem mls_a : True := by sorry",
+        })
+        .expect("mls_a should elaborate");
+    worker.accept(a.candidate).unwrap();
+    let s1 = worker.snapshot();
+
+    let b = worker
+        .check_statement(StatementRequest {
+            block_id: block_id(41),
+            declaration_name: "mls_b",
+            source: "def mls_b : True := mls_a",
+        })
+        .expect("mls_b should build on mls_a");
+    worker.accept(b.candidate).unwrap();
+    assert_known(&mut worker, 42, "mls_b");
+
+    worker.restore(s1).unwrap();
+    assert_unknown(&mut worker, 43, "mls_b");
+    assert_known(&mut worker, 44, "mls_a");
+
+    // Accept a different branch from s1; the abandoned mls_b stays unknown.
+    let b_prime = worker
+        .check_statement(StatementRequest {
+            block_id: block_id(45),
+            declaration_name: "mls_b_prime",
+            source: "def mls_b_prime : True := mls_a",
+        })
+        .expect("mls_b_prime should build on mls_a");
+    worker.accept(b_prime.candidate).unwrap();
+    assert_known(&mut worker, 46, "mls_b_prime");
+    assert_unknown(&mut worker, 47, "mls_b");
+
+    worker.restore(base).unwrap();
+    assert_unknown(&mut worker, 48, "mls_a");
+}
