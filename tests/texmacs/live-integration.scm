@@ -121,6 +121,13 @@
     (display* "SUMMARY pass=" mls-test-pass " fail=" mls-test-fail "\n")
     (quit-TeXmacs)))
 
+(define (live-wait-until ready? budget-ms then)
+  "Call THEN once READY? holds, or after BUDGET-MS milliseconds, polling every 100 ms.
+TeXmacs and the stub daemon can take several seconds to start, so a fixed pause races."
+  (if (or (ready?) (<= budget-ms 0))
+      (then)
+      (delayed (:pause 100) (live-wait-until ready? (- budget-ms 100) then))))
+
 (define (live-run)
   (let* ((path (mls-test-doc "canonical.tm"))
          (url (string->url path)))
@@ -135,7 +142,10 @@
     (mls-check "review action is blocked before didOpen acknowledgement"
                (not (mls-live-review-action
                      "a98f524a-4ad6-4b0d-92d2-15b37d08f555" "confirm" '())))
-    (delayed (:pause 3000)
+    (live-wait-until
+     (lambda () (and (= mls-live-revision 1) mls-live-view))
+     20000
+     (lambda ()
       (switch-to-buffer url)
       (when (not (= mls-live-revision 1))
         (display* "  live-last-error: " (object->string mls-live-last-error) "\n"))
@@ -210,7 +220,7 @@
                      (mls-live-review-action
                       "a98f524a-4ad6-4b0d-92d2-15b37d08f555" "confirm"
                       '(("conclusion" . ""))))
-          (delayed (:pause 250) (live-finish)))))))
+          (delayed (:pause 250) (live-finish))))))))
 
 (catch #t
   (lambda () (lazy-plugin-force) (live-run))
