@@ -16,6 +16,7 @@ use std::{
     time::Duration,
 };
 
+mod retrieval;
 mod review;
 
 #[derive(Serialize)]
@@ -55,6 +56,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     if arguments.first().is_some_and(|arg| arg == "batch") {
         return batch(&arguments[1..]);
+    }
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == "retrieval-index")
+    {
+        return retrieval::run(&arguments[1..]);
     }
     inspect(&arguments)
 }
@@ -1095,7 +1102,7 @@ fn workspace_root() -> PathBuf {
 }
 fn print_help() {
     println!(
-        "Usage:\n  mls [--write-ids] FILE.tm\n  mls batch FILE.tm (--replay DIR | --live) [--model-config FILE] [--output FILE] [--max-attempts N]\n\nBatch mode is offline unless --live and MLS_LIVE=1 are both supplied."
+        "Usage:\n  mls [--write-ids] FILE.tm\n  mls batch FILE.tm (--replay DIR | --live) [--model-config FILE] [--output FILE] [--max-attempts N]\n  mls retrieval-index INDEX_DIR (--live | --replay RECORDINGS_DIR) [--batch-size N]\n\nLive mode requires --live and MLS_LIVE=1."
     );
     review::print_help();
 }
