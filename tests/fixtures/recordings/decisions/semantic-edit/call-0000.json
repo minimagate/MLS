@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "endpoint_kind": "decision",
+  "block_id": "00000000-0000-4000-8000-000000000001",
+  "attempt": 0,
+  "request": {
+    "context": {
+      "attempt": 0,
+      "block_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "endpoint": "/api/alpha/decisions",
+    "model": "typesafe/jev-1.14",
+    "questions": {
+      "answer": {
+        "criteria": {
+          "false": "The edit changes only wording, spacing, formatting or typography.",
+          "true": "The edit changes the mathematical meaning."
+        },
+        "instructions": "Compare state.old with state.new. Does the edit change the mathematical meaning, rather than only wording, spacing, formatting or typography?",
+        "type": "noul"
+      }
+    },
+    "state": {
+      "new": "a ≤ b ",
+      "old": "a ≤ b"
+    }
+  },
+  "request_hash": "7e5b96063290c7d5034ae29ccc85a6151b7f6367e20a811ae1d8206aec147b07",
+  "configured_model": "typesafe/jev-1.14",
+  "resolved_model": "typesafe/jev-1.14-20261014",
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 1,
+    "total_tokens": 121,
+    "cost": 0.25
+  },
+  "elapsed_ms": 0,
+  "response_status": 200,
+  "provider_response": {
+    "synthetic": true
+  },
+  "response": {
+    "answers": {
+      "answer": {
+        "noul": 0.04,
+        "type": "noul"
+      }
+    },
+    "metadata": {
+      "configured_model": "typesafe/jev-1.14",
+      "http_status": 200,
+      "latency_ms": 0,
+      "provider": null,
+      "provider_response": {
+        "synthetic": true
+      },
+      "request_id": null,
+      "resolved_model": "typesafe/jev-1.14-20261014",
+      "usage": {
+        "cost": 0.25,
+        "input_tokens": 120,
+        "output_tokens": 1,
+        "total_tokens": 121
+      }
+    }
+  },
+  "error": null,
+  "provenance": "synthetic"
+}

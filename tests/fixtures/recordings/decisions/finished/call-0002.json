@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "endpoint_kind": "decision",
+  "block_id": "00000000-0000-4000-8000-000000000001",
+  "attempt": 2,
+  "request": {
+    "context": {
+      "attempt": 2,
+      "block_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "endpoint": "/api/alpha/decisions",
+    "model": "typesafe/jev-1.14",
+    "questions": {
+      "answer": {
+        "criteria": {
+          "false": "The block is incomplete or still being written.",
+          "true": "The block is complete."
+        },
+        "instructions": "Is state.block a complete, self-contained piece of writing, rather than a sentence or formula still being typed?",
+        "type": "noul"
+      }
+    },
+    "state": {
+      "block": "Let x"
+    }
+  },
+  "request_hash": "760f8daf46b27c7d7bcca39d0879bfe06d423b2b02969848c46898dc1ee474d4",
+  "configured_model": "typesafe/jev-1.14",
+  "resolved_model": "typesafe/jev-1.14-20261014",
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 1,
+    "total_tokens": 121,
+    "cost": 0.25
+  },
+  "elapsed_ms": 0,
+  "response_status": 200,
+  "provider_response": {
+    "synthetic": true
+  },
+  "response": {
+    "answers": {
+      "answer": {
+        "noul": 0.02,
+        "type": "noul"
+      }
+    },
+    "metadata": {
+      "configured_model": "typesafe/jev-1.14",
+      "http_status": 200,
+      "latency_ms": 0,
+      "provider": null,
+      "provider_response": {
+        "synthetic": true
+      },
+      "request_id": null,
+      "resolved_model": "typesafe/jev-1.14-20261014",
+      "usage": {
+        "cost": 0.25,
+        "input_tokens": 120,
+        "output_tokens": 1,
+        "total_tokens": 121
+      }
+    }
+  },
+  "error": null,
+  "provenance": "synthetic"
+}

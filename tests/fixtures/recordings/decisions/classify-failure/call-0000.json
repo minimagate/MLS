@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "endpoint_kind": "decision",
+  "block_id": "00000000-0000-4000-8000-000000000001",
+  "attempt": 0,
+  "request": {
+    "context": {
+      "attempt": 0,
+      "block_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "endpoint": "/api/alpha/decisions",
+    "model": "typesafe/jev-1.14",
+    "questions": {
+      "answer": {
+        "criteria": {
+          "claim": "The block states a mathematical claim to formalize.",
+          "commentary": "The block is anything else, such as motivation or remarks.",
+          "proof_step": "The block is one step of an argument for a claim."
+        },
+        "instructions": "Classify the block. Choose claim if it asserts a mathematical statement that could be formalized. Choose proof_step if it is one step of an argument for a claim. Choose commentary for anything else.",
+        "type": "choice"
+      }
+    },
+    "state": {
+      "block": "Every bounded monotone real sequence converges."
+    }
+  },
+  "request_hash": "2f1f61854a5c9ac3e6bdd1772339439a88ba7f6201971e1b668429eeb8678f8e",
+  "configured_model": "typesafe/jev-1.14",
+  "resolved_model": null,
+  "usage": null,
+  "elapsed_ms": 0,
+  "response_status": null,
+  "provider_response": null,
+  "response": null,
+  "error": {
+    "kind": "transport",
+    "message": "connection reset"
+  },
+  "provenance": "synthetic"
+}

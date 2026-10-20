@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "endpoint_kind": "decision",
+  "block_id": "00000000-0000-4000-8000-000000000001",
+  "attempt": 2,
+  "request": {
+    "context": {
+      "attempt": 2,
+      "block_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "endpoint": "/api/alpha/decisions",
+    "model": "typesafe/jev-1.14",
+    "questions": {
+      "answer": {
+        "criteria": {
+          "lem:bound": "The block relies on the statement labelled lem:bound.",
+          "none": "The block relies on none of the listed statements.",
+          "thm:first": "The block relies on the statement labelled thm:first."
+        },
+        "instructions": "Which of the listed labels does state.block rely on implicitly, for example by saying 'by the previous lemma'? Choose none unless the block clearly relies on one of them.",
+        "type": "choice"
+      }
+    },
+    "state": {
+      "block": "Then the bound holds.",
+      "candidates": [
+        "thm:first",
+        "lem:bound"
+      ]
+    }
+  },
+  "request_hash": "aba49b8f98a2e111f043eda133b627c75c71bffe7af3125faf3f868f142cfd8e",
+  "configured_model": "typesafe/jev-1.14",
+  "resolved_model": "typesafe/jev-1.14-20261014",
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 1,
+    "total_tokens": 121,
+    "cost": 0.25
+  },
+  "elapsed_ms": 0,
+  "response_status": 200,
+  "provider_response": {
+    "synthetic": true
+  },
+  "response": {
+    "answers": {
+      "answer": {
+        "choice": "thm:first",
+        "confidence": 0.6,
+        "probabilities": {
+          "lem:bound": 0.3,
+          "none": 0.2,
+          "thm:first": 0.5
+        },
+        "type": "choice"
+      }
+    },
+    "metadata": {
+      "configured_model": "typesafe/jev-1.14",
+      "http_status": 200,
+      "latency_ms": 0,
+      "provider": null,
+      "provider_response": {
+        "synthetic": true
+      },
+      "request_id": null,
+      "resolved_model": "typesafe/jev-1.14-20261014",
+      "usage": {
+        "cost": 0.25,
+        "input_tokens": 120,
+        "output_tokens": 1,
+        "total_tokens": 121
+      }
+    }
+  },
+  "error": null,
+  "provenance": "synthetic"
+}

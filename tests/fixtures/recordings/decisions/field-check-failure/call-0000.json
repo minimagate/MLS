@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "endpoint_kind": "decision",
+  "block_id": "00000000-0000-4000-8000-000000000001",
+  "attempt": 0,
+  "request": {
+    "context": {
+      "attempt": 0,
+      "block_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "endpoint": "/api/alpha/decisions",
+    "model": "typesafe/jev-1.14",
+    "questions": {
+      "conclusion.quantifier": {
+        "criteria": {
+          "existential": "The main claim asserts that some element exists.",
+          "neither": "The main claim has no outermost quantifier.",
+          "universal": "The main claim holds for all elements of its domain."
+        },
+        "instructions": "What is the outermost quantifier of the main claim of state.block? Choose universal for a for-all claim, existential for a there-exists claim, and neither otherwise.",
+        "type": "choice"
+      },
+      "hypotheses[0].stated": {
+        "criteria": {
+          "implied": "The block only implies this hypothesis.",
+          "stated": "The block states this hypothesis explicitly."
+        },
+        "instructions": "Is the hypothesis state.hypotheses[0] stated explicitly in state.block, or only implied by it?",
+        "type": "choice"
+      }
+    },
+    "state": {
+      "block": "Let f be continuous on the interval (a, b).",
+      "hypotheses": [
+        "f is continuous on [a, b]"
+      ]
+    }
+  },
+  "request_hash": "7378c71bb90ca787d4f5a88acabb3b600c266213b8ee0fdd51ef47b618e97428",
+  "configured_model": "typesafe/jev-1.14",
+  "resolved_model": null,
+  "usage": {
+    "input_tokens": 40,
+    "output_tokens": 0,
+    "total_tokens": 40,
+    "cost": null
+  },
+  "elapsed_ms": 0,
+  "response_status": 503,
+  "provider_response": {
+    "error": "unavailable"
+  },
+  "response": null,
+  "error": {
+    "kind": "provider",
+    "message": "provider HTTP status 503",
+    "failure": {
+      "status": 503,
+      "response": {
+        "error": "unavailable"
+      },
+      "resolved_model": null,
+      "usage": {
+        "input_tokens": 40,
+        "output_tokens": 0,
+        "total_tokens": 40,
+        "cost": null
+      }
+    }
+  },
+  "provenance": "synthetic"
+}

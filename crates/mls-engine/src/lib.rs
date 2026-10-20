@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 
+pub mod decisions;
 pub mod review;
 
 pub use review::{

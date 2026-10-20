@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "endpoint_kind": "decision",
+  "block_id": "00000000-0000-4000-8000-000000000001",
+  "attempt": 0,
+  "request": {
+    "context": {
+      "attempt": 0,
+      "block_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "endpoint": "/api/alpha/decisions",
+    "model": "typesafe/jev-1.14",
+    "questions": {
+      "conclusion.quantifier": {
+        "criteria": {
+          "existential": "The main claim asserts that some element exists.",
+          "neither": "The main claim has no outermost quantifier.",
+          "universal": "The main claim holds for all elements of its domain."
+        },
+        "instructions": "What is the outermost quantifier of the main claim of state.block? Choose universal for a for-all claim, existential for a there-exists claim, and neither otherwise.",
+        "type": "choice"
+      },
+      "hypotheses[0].stated": {
+        "criteria": {
+          "implied": "The block only implies this hypothesis.",
+          "stated": "The block states this hypothesis explicitly."
+        },
+        "instructions": "Is the hypothesis state.hypotheses[0] stated explicitly in state.block, or only implied by it?",
+        "type": "choice"
+      },
+      "hypotheses[1].stated": {
+        "criteria": {
+          "implied": "The block only implies this hypothesis.",
+          "stated": "The block states this hypothesis explicitly."
+        },
+        "instructions": "Is the hypothesis state.hypotheses[1] stated explicitly in state.block, or only implied by it?",
+        "type": "choice"
+      },
+      "hypotheses[2].stated": {
+        "criteria": {
+          "implied": "The block only implies this hypothesis.",
+          "stated": "The block states this hypothesis explicitly."
+        },
+        "instructions": "Is the hypothesis state.hypotheses[2] stated explicitly in state.block, or only implied by it?",
+        "type": "choice"
+      },
+      "interval[1].endpoints": {
+        "criteria": {
+          "closed": "Both endpoints are included.",
+          "half_open": "Exactly one endpoint is included.",
+          "open": "Neither endpoint is included.",
+          "unspecified": "The text does not say which endpoints are included."
+        },
+        "instructions": "Does the interval phrase state.interval_phrases[0] in state.block include its endpoints?",
+        "type": "choice"
+      }
+    },
+    "state": {
+      "block": "Let f be continuous on the interval (a, b). Then the interval is bounded.",
+      "hypotheses": [
+        "f is continuous on [a, b]",
+        "a ≤ b",
+        "f is bounded"
+      ],
+      "interval_phrases": [
+        "interval is bounded"
+      ]
+    }
+  },
+  "request_hash": "1f3a27094bc944de8dc58885affe5b616553f671b4c64ba23271bd5f69de259e",
+  "configured_model": "typesafe/jev-1.14",
+  "resolved_model": "typesafe/jev-1.14-20261014",
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 1,
+    "total_tokens": 121,
+    "cost": 0.25
+  },
+  "elapsed_ms": 0,
+  "response_status": 200,
+  "provider_response": {
+    "synthetic": true
+  },
+  "response": {
+    "answers": {
+      "conclusion.quantifier": {
+        "choice": "universal",
+        "confidence": 0.93,
+        "probabilities": {
+          "existential": 0.03,
+          "neither": 0.02,
+          "universal": 0.95
+        },
+        "type": "choice"
+      },
+      "hypotheses[0].stated": {
+        "choice": "stated",
+        "confidence": 0.95,
+        "probabilities": {
+          "implied": 0.04,
+          "stated": 0.96
+        },
+        "type": "choice"
+      },
+      "hypotheses[1].stated": {
+        "choice": "implied",
+        "confidence": 0.9,
+        "probabilities": {
+          "implied": 0.94,
+          "stated": 0.06
+        },
+        "type": "choice"
+      },
+      "hypotheses[2].stated": {
+        "choice": "stated",
+        "confidence": 0.5,
+        "probabilities": {
+          "implied": 0.4,
+          "stated": 0.6
+        },
+        "type": "choice"
+      },
+      "interval[1].endpoints": {
+        "choice": "open",
+        "confidence": 0.92,
+        "probabilities": {
+          "closed": 0.03,
+          "half_open": 0.02,
+          "open": 0.93,
+          "unspecified": 0.02
+        },
+        "type": "choice"
+      }
+    },
+    "metadata": {
+      "configured_model": "typesafe/jev-1.14",
+      "http_status": 200,
+      "latency_ms": 0,
+      "provider": null,
+      "provider_response": {
+        "synthetic": true
+      },
+      "request_id": null,
+      "resolved_model": "typesafe/jev-1.14-20261014",
+      "usage": {
+        "cost": 0.25,
+        "input_tokens": 120,
+        "output_tokens": 1,
+        "total_tokens": 121
+      }
+    }
+  },
+  "error": null,
+  "provenance": "synthetic"
+}

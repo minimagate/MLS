@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "endpoint_kind": "decision",
+  "block_id": "00000000-0000-4000-8000-000000000001",
+  "attempt": 1,
+  "request": {
+    "context": {
+      "attempt": 1,
+      "block_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "endpoint": "/api/alpha/decisions",
+    "model": "typesafe/jev-1.14",
+    "questions": {
+      "answer": {
+        "criteria": {
+          "false": "state.sir faithfully records the claim of state.block.",
+          "true": "state.sir states a different claim."
+        },
+        "instructions": "state.sir is a semi-formal record of the claim made by state.block. Does state.sir state a different claim, with a different quantifier, hypothesis or conclusion? Answer no for a faithful reading or a mere rewording.",
+        "type": "noul"
+      }
+    },
+    "state": {
+      "block": "Every x satisfies f x ≤ 1.",
+      "sir": "{\"conclusion\":\"∀ x, f x ≤ 1\",\"hypotheses\":[],\"kind\":\"theorem\",\"variables\":[{\"name\":\"f\",\"type\":\"function ℝ → ℝ\"}]}"
+    }
+  },
+  "request_hash": "67e692c8fab0eb4f90f612d82c211c64783b6530951f5ff9c2b2ca8a9eeac4b0",
+  "configured_model": "typesafe/jev-1.14",
+  "resolved_model": "typesafe/jev-1.14-20261014",
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 1,
+    "total_tokens": 121,
+    "cost": 0.25
+  },
+  "elapsed_ms": 0,
+  "response_status": 200,
+  "provider_response": {
+    "synthetic": true
+  },
+  "response": {
+    "answers": {
+      "answer": {
+        "noul": 0.5,
+        "type": "noul"
+      }
+    },
+    "metadata": {
+      "configured_model": "typesafe/jev-1.14",
+      "http_status": 200,
+      "latency_ms": 0,
+      "provider": null,
+      "provider_response": {
+        "synthetic": true
+      },
+      "request_id": null,
+      "resolved_model": "typesafe/jev-1.14-20261014",
+      "usage": {
+        "cost": 0.25,
+        "input_tokens": 120,
+        "output_tokens": 1,
+        "total_tokens": 121
+      }
+    }
+  },
+  "error": null,
+  "provenance": "synthetic"
+}
