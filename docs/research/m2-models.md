@@ -70,21 +70,22 @@ Project requirements from §5/§8:
 - SIR requires all fields: `kind`, nullable `label`, `variables`, `hypotheses`,
   `conclusion`, `uses`, `assumptions_made`. Variables require `name` and `type`.
   Arrays may be empty; missing `assumptions_made` must fail validation.
-- Lean output requires `lean_statement`, nullable `lean_proof`,
-  `mathlib_names_used`, and `notes`. M2 must never ask for or execute a model proof.
-  Construct the theorem's `sorry` locally and reject unexpected proof content.
+- One formalization output requires exactly `sir`, `lean_statement`, nullable
+  `lean_proof`, and `notes` (string array). M2/M4 require a null proof;
+  `mathlib_names_used` is not part of the schema.
 - Reject null/absent assistant content, refused or truncated completion, malformed
   JSON, unrecognized fields, invalid kind, and invalid dependency references.
   Structured shape alone says nothing about mathematical faithfulness.
-- Give SIR generation the current block and dependency SIRs. Give Lean generation
-  the accepted SIR and bounded relevant Mathlib context. Repair requests add only
-  the failed statement and Lean diagnostics; retain the original SIR unchanged.
+- Each initial and repair call returns the SIR and Lean statement together. Include
+  source, accepted dependency SIRs/declarations and applicable review context. A repair
+  includes the full previous combined response and exact Lean/structure diagnostics;
+  the model may correct both SIR and Lean. Never provide expected/reference SIRs.
 - M2 batch checking is a draft/evaluation path, not human confirmation. Successful
   elaboration must not imply that a user confirmed the statement.
 
 Recommended starting project defaults (policy choices, not vendor requirements):
-`max_tokens=4096`, request timeout 120 seconds, 2 Lean repair attempts after the
-initial generation, and serial processing initially. Record all attempts and costs.
+`formalization_max_tokens=4096`, request timeout 120 seconds, and a bounded
+combined-formalization attempt count. Record all attempts and costs.
 Do not silently substitute models when a configured model fails.
 
 ## Typed Jev requests and confidence

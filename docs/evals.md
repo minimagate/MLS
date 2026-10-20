@@ -130,6 +130,45 @@ Limitation: ℝ² was rendered as `ℝ × ℝ` in three statements and as
 `EuclideanSpace ℝ (Fin 2)` in `linear-zero`; independently formalized
 statements need a shared representation once they depend on one another.
 
+## Deterministic failure categories (2026-10-20)
+
+`evals/run.py` now assigns exactly one category to each nonaccepted mapped case
+and emits all category counts under `failures`, version
+`mls-m2-failure-categories-v1`. Priority is explicit SIR contract/rejection
+evidence, a hard structure-scoped mismatch, Lean name resolution, a Lean typing
+diagnostic, then other. This classifies the final reported failure, not every
+intermediate repair attempt. Blocked dependencies also receive a category and
+retain their separate counter. Accepted drafts are excluded.
+
+The table below was computed offline on 2026-10-20 by calling the current
+`evals.run.summarize` on the five preserved raw BatchReports above, with the
+current `evals/cases.json`. The run-1 and run-3 replay reports reproduce the same
+category counts and are not counted as additional live trials. Historical raw
+reports and summaries were left unchanged; no new provider calls were made.
+
+| Final failure category | Run 1 (10 cases) | Run 2 (10 cases) | Run 3 (10 cases) |
+|---|---:|---:|---:|
+| Unknown/wrong Mathlib name (`unknown_or_wrong_mathlib_name`) | 0 | 0 | 0 |
+| Type error (`type_error`) | 0 | 0 | 0 |
+| Structure-check mismatch (`structure_check_mismatch`) | 0 | 0 | 0 |
+| SIR wrong (`sir_wrong`, explicit contract/rejection evidence) | 0 | 0 | 0 |
+| Other (`other`) | 4 | 2 | 0 |
+| **All nonaccepted cases** | **4** | **2** | **0** |
+
+Run 1's four `other` cases comprise three unsupported-admission-syntax failures
+and one truncated completion. Run 2's two are extra-command admission failures.
+The raw report SHA-256 values begin `9e5a03013832`, `93323869f056`, and
+`71d04c4b9747` for runs 1, 2, and 3 respectively. Both replay raw reports are
+byte-identical to their corresponding live raw reports.
+
+Name resolution means Lean reported an unknown constant/identifier/namespace or
+invalid field; it does not establish which Mathlib declaration was intended.
+Zero `sir_wrong` means no explicit SIR contract/rejection failure was reported,
+not that all SIRs were semantically faithful. Reference wording inequality is
+never used for this category. The accepted but unfaithful run-1 kernel draft
+remains part of the independent manual review above, outside these engine-failure
+counts.
+
 ## M2 go/no-go (2026-10-20)
 
 **Go, with stated limits.** On this curated ten-statement corpus the final

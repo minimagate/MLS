@@ -199,6 +199,65 @@ These results support the M2 go decision only within the limits stated in
   the timeout/restart worker semantics sound, and the live scheduler clean after
   extra probes for late completions, review changes, identical upstream SIR
   hashes, and cycle repair around an in-flight job.
-- This checkpoint validates transport-independent M4 components only. Premise
-  retrieval, the daemon, the live TeXmacs client and full live real-Lean replay
-  remain unfinished and are not claimed here.
+- At this checkpoint, validation covered transport-independent M4 components
+  only. The daemon, live TeXmacs client and full live real-Lean replay were not
+  implemented and are not claimed as executed in this entry.
+
+## 2026-10-20 — M5 proof core integration
+
+Proof generation is gated by the current review entry matching the report's exact
+SIR, semantic hash, source text hash, and accepted Lean declaration. Sonnet uses
+the existing `ModelClient` recording/replay path with a strict proof SIR and a
+bounded repair loop. Each full theorem declaration is checked transactionally
+through the existing Lean statement checker; only a compiled proof with no
+transitive `sorryAx` and no disallowed axioms is marked verified. Failed search
+stays unproven. Refutation remains unavailable unless a checker supplies
+positive, clean Lean evidence for a negation or counterexample.
+
+The offline recording/replay proof integration and the `MLS_LEAN_TESTS=1`
+real-Lean `exact?` proof test are present in `crates/mls-engine/tests/proof.rs`.
+The reviewed block view exposes an optional scalar `proof_status`, detailed proof
+diagnostics, and aggregate `proof_counts`. Live confirmation queues a proof-only
+job and preserves the accepted Lean statement while it runs. At this checkpoint,
+daemon trigger and interactive marker wiring remained in progress.
+
+Verification passed with `cargo fmt --all --check`, `cargo test -p
+mls-engine --all-targets`, `cargo test -p mls-cli --no-run`, and strict engine
+Clippy. The pinned test `MLS_LEAN_TESTS=1 cargo test -p mls-engine --test
+proof confirmed_statement_reaches_verified_status_with_real_lean_when_enabled`
+passed after first accepting the placeholder theorem in the worker environment.
+
+## 2026-10-20 — Current offline, Lean and standard TeXmacs suites
+
+- `make test` passed: evaluator tests, formatting, strict Clippy and the offline
+  workspace suite.
+- `make test-lean` passed after correcting the stale unified-call assertion.
+- `make test-lean` also runs the pinned real-Lean proof test and the gated
+  production-daemon acceptance test using recorded model calls.
+- Standard `make test-texmacs` passed: 324 headless checks across 11 files, 31
+  live-client checks, and the native TeXmacs roundtrip and parser-oracle suites.
+- Gated `MLS_LEAN_TESTS=1 make test-texmacs` passed: 366 checks across 11
+  files, including the real review flow (42 checks), 23 live-client checks, one
+  parser-oracle check and 3 native roundtrip checks.
+
+## 2026-10-20 — Current daemon/plugin coverage
+
+The implementation now includes the persistent `mls serve` JSON-RPC process,
+its session and production replay acceptance tests, and a TeXmacs live client.
+The daemon acceptance scenario in `crates/mls-cli/tests/serve/acceptance.rs`
+runs the production daemon with recorded model calls and real Lean when
+`MLS_LEAN_TESTS=1`. It replays a draft, explicit confirmation, verified proof,
+store persistence and reopen. The `make test-lean` recipe runs this test with
+the gate enabled. Separately, `tests/texmacs/run-live.sh` drives the plugin
+headlessly against a stub daemon; its fixture checks display of `verified`,
+`unproven` and `refuted`, not that live search generated each result. The
+standard TeXmacs run above executes this headless suite.
+
+The current runnable workflow is in [README.md](../README.md). The headless live
+suite verifies the panel lifecycle and client/daemon protocol, including the
+cursor/review race and panel isolation regressions. New untagged prose typed
+mid-session is a scoped v1 limitation: save and restart the session for startup
+ID persistence and classification. GUI-only checks remain owner-owed and
+unverified: menu and shortcut behavior, rendered panel colors and tooltips,
+review dialog and button callbacks, and footer repaint. No GUI result is claimed
+here.

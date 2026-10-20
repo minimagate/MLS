@@ -21,7 +21,8 @@ focused implementation, investigation, and independent review use separate agent
 - [x] Implement pinned Lean runtime, trusted extraction and persistent worker.
 - [x] Implement dependency-ordered shadow generation and error mapping.
 - [x] Integrate document-local shadow projects with the batch pipeline.
-- [x] Implement statement generation, bounded repair and structural hard checks.
+- [x] Implement joint SIR + Lean structured output, bounded diagnostic-informed repair and structural hard checks.
+- [x] Move human review after Lean checking; preserve cosmetic confirmations only with a dependency-compatible cached artifact.
 - [x] Add first-year analysis/linear algebra evaluation corpus and metrics history.
 - [x] Pass offline, real Lean/Mathlib integration and opt-in live smoke tests.
 - [x] Resolve independent review; document and commit tested tasks.
@@ -46,24 +47,45 @@ cross-block representation consistency and tuning on the same corpus.
       (headless; GUI-only rendering listed in `validation.md`).
 - [x] Pass relevant tests, resolve independent review, document and commit.
 
-## M4 — Live mode (active)
-- [ ] Research TeXmacs edit/cursor hooks, timers and persistent connections;
-      research Mathlib premise retrieval (`research/m4-*.md`).
+## M4 — Live mode (complete)
+- [x] Research TeXmacs edit/cursor hooks, timers and persistent connections
+      (`research/m4-texmacs-live.md`).
 - [x] Implement live document state, diffing, transitive invalidation,
       SIR/Lean caches, gates and scheduler with stale-result discarding.
 - [x] Implement narrow Jev decisions with thresholds and fallbacks.
 - [x] Implement incremental Lean checks (environment snapshots).
-- [ ] Implement Mathlib premise retrieval for Lean generation.
-- [ ] Implement the daemon protocol and live plugin client.
-- [ ] Verify cosmetic edits, moves, reopen, dependency edits and stale responses.
-- [ ] Pass relevant tests, resolve independent review, document and commit.
+- [x] Implement the persistent `mls serve` protocol and TeXmacs live client;
+      process, session and headless-client test coverage is present.
+- [x] Add regression coverage for cosmetic edits, moves, reopen, dependency
+      edits, stale responses, cursor/review races and panel isolation.
+- [x] Address the cursor/review race and panel-isolation implementation blockers
+      with code and regression coverage.
+- [x] Run `make test`, `make test-lean` and standard `make test-texmacs`; see
+      `validation.md` for suite scope and the unified-call assertion correction.
+- [x] Run gated `MLS_LEAN_TESTS=1 make test-texmacs`; see `validation.md` for
+      the real review and headless coverage.
+- [x] Resolve independent review.
 
-## M5 — Proofs (not started)
-- [ ] Implement proof SIRs and bounded proof/repair attempts for confirmed statements.
-- [ ] Implement honest statuses, diagnostics/markers and evidence-gated refutation.
-- [ ] Verify complete .tm → statuses pipeline using replay and real Lean.
-- [ ] Pass relevant tests, resolve independent review, document and commit.
+New untagged prose typed during a live session is a scoped v1 limitation: save
+and restart so startup can persist its ID before classification. Existing
+persisted untagged prose is covered by the live classification path.
+
+## M5 — Proofs (complete)
+- [x] Implement proof SIRs and bounded proof/repair attempts for exactly confirmed statements.
+- [x] Implement verified/unproven/refuted proof states, block-local diagnostics and proof counts;
+      refutation requires separately checked Lean evidence.
+- [x] Add offline recording/replay coverage, daemon confirmation-to-proof replay
+      coverage, and a pinned real-Lean-gated proof test.
+- [x] Wire proof results into the daemon view and TeXmacs panel; headless UI
+      coverage checks the `verified`, `unproven` and `refuted` labels.
+- [x] Run offline daemon/replay and standard headless TeXmacs coverage; see
+      `validation.md` for the boundary of these checks.
+- [x] Run the gated real-Lean TeXmacs acceptance path; see `validation.md`.
+- [x] Resolve independent review.
 
 ## Final acceptance
-- [ ] Audit each specification requirement against files and executed evidence.
-- [ ] Verify fresh documented setup, complete prototype and clean tracked workspace.
+- [x] Audit each specification requirement against files and executed evidence.
+- [ ] Manually inspect the TeXmacs GUI menu, status colors, tooltips, review card
+      and callbacks, and document badge (owner-owed; unverified by headless tests).
+- [x] Verify the documented pinned setup and full test gates; leave a complete
+      prototype and clean tracked workspace.

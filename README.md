@@ -1,7 +1,9 @@
 # MLS — Math Language Server
 
-The repository implements M1, a deterministic, offline parser CLI for TeXmacs
-native (`.tm`) documents, and M2, a batch statement-formalization command.
+The repository implements a testable v1 across M1–M5: a deterministic parser
+CLI for TeXmacs native (`.tm`) documents, batch statement formalization,
+human review, a persistent live daemon and plugin, and a proof core for
+human-confirmed statements. The TeXmacs GUI still needs an owner visual pass.
 The M1 parser finds sections, definitions, theorem-family
 environments, equations, and proofs; reports exact-source hashes, labels, and
 explicit label dependencies as JSON; and assigns unique UUIDs for the run.
@@ -79,10 +81,10 @@ whole sections, generation rejects it rather than emitting invalid Lean imports.
 
 ## Batch statement formalization (M2)
 
-`mls batch` drafts a statement intermediate representation (SIR) for every
-definition and theorem-family block, asks the generation model for one Lean
-statement, elaborates it with a `sorry` placeholder in the pinned Lean worker,
-and compares the trusted extracted structure with the SIR:
+`mls batch` asks the generation model for one combined SIR and Lean result for
+every definition and theorem-family block, elaborates the Lean statement with a
+`sorry` placeholder in the pinned Lean worker, and compares the trusted
+extracted structure with the returned SIR:
 
 ```sh
 cargo build -p mls-cli
@@ -113,9 +115,9 @@ MLS_LIVE=1 python3 evals/run.py --live --max-attempts 2
 ```
 
 `make test` runs the offline suites (including the evaluator tests);
-`make test-lean` additionally runs the real-Lean worker, pipeline and batch
-tests. Real-Lean tests skip themselves unless `MLS_LEAN_TESTS=1`, which
-`make test-lean` sets.
+`make test-lean` additionally runs the real-Lean worker, pipeline, batch,
+proof-core and production-daemon acceptance tests. Real-Lean tests skip
+themselves unless `MLS_LEAN_TESTS=1`, which `make test-lean` sets.
 
 ## TeXmacs review (M3)
 
@@ -150,3 +152,57 @@ the real `review-status`; `MLS_LEAN_TESTS=1 make test-texmacs` adds the real
 end-to-end review flow with replayed model calls and real Lean.
 `MLS_TEXMACS_TESTS=1 cargo test -p mls-tm --test texmacs_roundtrip` checks that
 real TeXmacs saves leave block identities and canonical text unchanged.
+
+## Live daemon and proof workflow (M4/M5)
+
+The `mls serve` command runs a persistent JSON-RPC session for one saved
+TeXmacs document. Its Scheme client sends document snapshots and cursor/review
+actions, then renders formalization and proof statuses in the MLS panel. A
+confirmation queues a proof-only job for that exact accepted SIR and Lean
+statement; the statement remains visible while bounded proof attempts run.
+Proof status is separate from statement status: `verified` requires a complete
+Lean-checked theorem with no `sorryAx` or disallowed axiom, while exhausted
+search is `unproven`. `refuted` is reserved for separately checked positive
+Lean evidence; the current proof search does not discover refutations.
+
+Run the local build and replay-backed acceptance checks with the pinned Lean
+runtime already installed:
+
+```sh
+cargo build -p mls-cli
+MLS_LEAN_TESTS=1 cargo test -p mls-cli --test serve acceptance::real_daemon_drafts_confirms_proves_persists_and_reopens_a_saved_document -- --exact --nocapture
+MLS_LEAN_TESTS=1 cargo test -p mls-engine --test proof confirmed_statement_reaches_verified_status_with_real_lean_when_enabled -- --exact --nocapture
+make test-texmacs
+```
+
+With `MLS_LEAN_TESTS=1`, the production-daemon acceptance test uses recorded
+model calls and real Lean to check draft, confirmation, proof verification,
+persistence and reopen. The pinned Lean proof test checks a real compiled
+proof. `make test-texmacs` includes the headless live
+client test against a deterministic stub daemon; it checks display of all three
+proof labels, but does not obtain those outcomes from live proof search. For
+the complete offline and Lean suites, run `make test` and `make test-lean`.
+
+For direct daemon use, start a replay session with
+`target/debug/mls serve --replay crates/mls-cli/tests/serve/fixtures/acceptance`
+or an explicitly opted-in live session with
+`MLS_LIVE=1 target/debug/mls serve --live` (with `OPENROUTER_API_KEY` set).
+Send the newline-delimited JSON-RPC messages in [docs/protocol.md](docs/protocol.md)
+to stdin; the first `didOpen` must include the complete source of a saved
+document. The replay acceptance test above provides the complete deterministic
+request sequence, including confirmation and proof completion.
+
+To try the live TeXmacs client manually, build MLS and install the plugin as
+shown above, then start TeXmacs with `OPENROUTER_API_KEY` available and
+`MLS_BIN` set to the built `target/debug/mls`. Open a saved `.tm` file, enable
+“Allow live model calls”, start the MLS live session, and choose “Open live
+status panel”. Review a drafted SIR to confirm it; the panel keeps its accepted statement visible while proof
+search runs and then shows `verified` or `unproven`. A proof search failure is
+not a refutation. Live calls require network access and are recorded beside the
+document. See [docs/protocol.md](docs/protocol.md) for JSON-RPC messages and
+serialized view fields, [docs/progress.md](docs/progress.md) for remaining
+acceptance work, and [docs/validation.md](docs/validation.md) for the boundary
+between recorded evidence and checks still to run. New untagged prose typed
+mid-session is picked up after save and live-session restart so its startup ID
+can be persisted. The manual GUI pass remains owner-owed and unverified; it
+covers the menu, rendered colors, tooltips and review dialog.

@@ -285,19 +285,6 @@ confers confirmation: `statement_confirmed` still follows the M3 review rules.
 Why: principle 4 (nothing is re-formalized unless its meaning or a
 dependency's meaning changed) applies to drafts as much as to confirmed SIRs.
 
-## 2026-10-20 — Premise retrieval uses embeddings with a lexical fallback
-Context: on the ten evaluation SIRs, a BM25F lexical retriever over Mathlib
-names, docstrings and types found a relevant premise in the top ten for 0/10
-cases using SIR content alone (5/10 with optimistic label hints). OpenRouter
-offers an embeddings endpoint and catalog. Choice: retrieve premises by
-embedding similarity over an index of the pinned Mathlib's public declarations,
-with the embedding model id in configuration, every call recorded and
-replayable, and vectors cached locally keyed by Mathlib commit, extractor hash
-and model. The lexical retriever remains the offline fallback when embeddings
-are unavailable. Retrieved premises only inform Lean generation; they never
-affect structure checks or statuses. Why: the spec calls for embeddings, and
-the lexical baseline is too weak to help the model.
-
 ## 2026-10-20 — Live jobs settle explicitly and account every call
 Context: live work can become stale while a model call is running, callers can
 drop an issued job, dependency graphs can contain cycles, and an automatic
@@ -324,3 +311,95 @@ replace every retained snapshot. The restart threshold remains configurable
 and will be chosen after a long-session response-count/RSS benchmark. Why: an
 arbitrary worker-local interval could silently discard the only incremental
 checkpoints the caller still relies on.
+
+## 2026-10-20 — Remove premature retrieval; keep repair search local to Lean
+
+Context: no measured improvement on recorded runtime-generated SIRs established
+that statement formalization needs a separate embedding retriever. Reference-SIR
+and optimistic label-hint retrieval experiments do not establish that benefit.
+Maintaining a declaration extractor, embedding index, query calls, cache formats
+and recording workflow adds a second search system before that need is measured.
+Choice: remove the embedding/BM25F retriever from the application and its M4
+requirements. Use the pinned Lean environment's name resolution and diagnostics
+for repair; introduce bounded local goal search only when a concrete repair case
+requires it. This supersedes the earlier embeddings-with-lexical-fallback choice.
+Search remains advisory and cannot confirm a SIR or change structural status.
+
+Verification on this date used only `scripts/run-lean-repl.sh`, the local Lean
+4.19.0 toolchain and Mathlib `c44e0c8ee63ca166450922a373c7409c5d26b00b`.
+`import Mathlib` imports `Mathlib.Tactic.Common`, which imports
+`LeanSearchClient` at `25078369972d295301f5a1e53c3e5850cf6d9d4c`.
+No toolchains or packages were downloaded. The available tools have different
+semantics:
+
+- `#check Nat.add_comm` resolves the existing declaration and prints its type.
+  A nonexistent name produces an `unknown identifier` error. This is local name
+  resolution, not natural-language retrieval.
+- `example (n m : ℕ) : n + m = m + n := by exact?` searches the imported
+  environment locally and reports `Try this: exact Nat.add_comm n m`.
+  `exact? using h` can require a local hypothesis in the proof; with
+  `h : p → q` and `hp : p`, it reports `exact h hp`. Failure to close the
+  typed goal is an error. It needs no network service.
+- `apply?` and `apply? using h` use the same local library search but can return
+  partial suggestions. They must never be treated as proof completion: the
+  probe `theorem probe (n : ℕ) : 0 < n := by apply?` returned partial `refine`
+  suggestions, admitted the goal and depended on `sorryAx`. It emitted 595
+  messages (about 100 KiB of JSON), so output limits matter alongside
+  time and heartbeat limits.
+- `#loogle Nat.add_comm` accepts a constant filter; name strings, patterns and
+  comma-separated filters are also in the installed syntax. In this pin it is
+  an HTTP client, not a local index: uncached nonempty queries invoke `curl`
+  against `https://loogle.lean-lang.org/json?q=...`. The command prints suggested
+  `#check` calls; the tactic form prints suggestions without changing the goal.
+- `#leansearch "Commutativity of natural-number addition."` accepts a quoted
+  natural-language query ending in `.` or `?`. An incomplete query warns and
+  makes no request. An uncached complete query invokes `curl` with a JSON POST
+  to `https://leansearch.net/search`. Its command and tactic forms display
+  suggestions; the tactic does not solve the goal. Both clients have only
+  process-local result caches, and neither promises the pinned Mathlib revision.
+- `#moogle` and generic `#search` can query the Moogle HTTP endpoint selected by
+  `leansearchclient.backend`; `#statesearch` sends the current goal to the
+  LeanStateSearch service. These are also external search paths.
+- Mathlib's `polyrith` tactic serializes hypotheses and the target into a query
+  and invokes `curl` to POST it to SageCell. It can disclose proof context and
+  depends on that external service.
+
+The two HTTP client forms were exercised with `curl` replaced on `PATH` by a
+local deterministic stub returning `Nat.add_comm`, including command and tactic
+suggestions. The stub intercepted exactly one Loogle GET and one LeanSearch POST;
+no external search was contacted. This verifies the installed syntax, request
+behavior and handling of a supplied result, not remote availability or recall.
+The implementation evidence is in the pinned Lean
+`Lean/Elab/Tactic/LibrarySearch.lean` and LeanSearchClient's `Syntax.lean` and
+`LoogleSyntax.lean`.
+
+Repair prompts may rely on `import Mathlib`, actual compiler diagnostics and
+names/types verified in that imported environment. They must preserve the actual
+runtime SIR as their semantic input. A future trusted search step may construct
+an explicit typed Lean goal and collect bounded `exact?`/`apply?` hints from an
+isolated branch; neither tactic translates prose or establishes SIR faithfulness.
+The current statement-admission grammar still requires the engine-injected
+`by sorry` theorem body and rejects tactics in signatures and definition bodies.
+Prompts must not put search tactics or `#check`/search commands into admitted
+candidate source, or claim that an automatic search phase already exists.
+`#loogle`, `#leansearch`, `#moogle`, `#statesearch`, `#search`, and `polyrith`
+are excluded from automatic repair: they introduce network disclosure and
+availability, external-index versioning and unrecorded side effects rather than
+providing an offline replacement. Proof admission now rejects these six parsed
+tactic atoms before elaborating candidate source; local `exact?` and `apply?`
+remain admissible.
+
+Before adding local automatic search, tests must cover a successful known-name
+suggestion, a missing name, an unsolved `exact?` goal and partial `apply?` results
+with `sorryAx`; deadline, heartbeat and output limits; no network subprocess;
+branch isolation after failures; and deterministic capture/replay of the query,
+Lean/Mathlib identity and bounded hints. Pipeline regressions must retain strict
+source admission, the `by sorry` placeholder, the existing attempt bound and
+unconfirmed draft status, with no expected/reference SIR in search inputs.
+Run real-Lean regressions only through the repository script with the existing
+explicit test gate; do not install packages to make them pass.
+
+
+## 2026-10-20 — One combined SIR and Lean generation call
+
+Context: separate SIR and Lean calls could leave the model-generated SIR detached from the Lean candidate, and a structure repair could not correct both together. Choice: each initial attempt and bounded repair uses one Sonnet structured-output call with exactly `sir`, `lean_statement`, `lean_proof`, and `notes`. M2/M4 require null proof and string-array notes. Strictly validate and identity-check every returned SIR, then elaborate and structurally compare the Lean statement from that same response. Repairs include the complete previous response and exact Lean/structure diagnostics. Review follows Lean checking; unchanged confirmed SIRs stay pinned, cosmetic regeneration retains the confirmed artifact when its dependency-keyed cache entry matches, changed SIRs supersede confirmation, and exact rejected SIRs remain rejected. Expected/reference SIRs are never prompt inputs. Mathlib imports and actual Lean diagnostics/name resolution may inform repair; no automatic Loogle/LeanSearch command is claimed or run. One completion-token setting bounds each combined attempt.

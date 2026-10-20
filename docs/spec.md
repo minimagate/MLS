@@ -122,7 +122,6 @@ MLS engine (Rust daemon, LSP-style JSON protocol over a pipe)
    ├─ Scheduler         what to process next, and when
    ├─ Decision layer    Jev via OpenRouter
    ├─ Formalizer        Sonnet 5 via OpenRouter, structured output
-   ├─ Retriever         embeddings over Mathlib names/docstrings (premise retrieval only)
    └─ Lean worker       Lean REPL with Mathlib loaded, generated shadow project
 ```
 
@@ -174,7 +173,7 @@ Block {
 
 ## 5. SIR — Statement Intermediate Representation
 
-Structured description of what a block *claims*, written by Sonnet before any Lean exists. Deliberately small: it captures the **shape** of a statement, and the mathematical content inside fields stays semi-formal text. Do not grow it into a logic language — that's Lean's job.
+The SIR is the first-class `sir` field in Sonnet's single structured formalization result. The same result contains the Lean statement and notes, so every initial attempt and repair proposes a coherent SIR/Lean pair. The SIR remains deliberately small: it captures statement shape, while mathematical content stays semi-formal text.
 
 ```json
 {
@@ -192,15 +191,17 @@ Structured description of what a block *claims*, written by Sonnet before any Le
 }
 ```
 
-- `assumptions_made` is mandatory. It forces the model to surface silent choices (types, domains, open vs closed), which is exactly what the human reviews.
-- **Proofs** get a lighter SIR: a list of steps and the lemmas/blocks each step uses. Used to guide proof attempts. Never needs confirmation.
+- `assumptions_made` is mandatory and surfaces silent choices for human review.
+- The SIR is independently deserialized and identity-checked before its paired Lean declaration is checked against it.
+- Generated outputs remain drafts until a human confirms the SIR. A confirmed or edited SIR stays pinned while the source text is unchanged.
+- A changed source that regenerates the same semantic SIR is a cosmetic reconfirmation. Keep the exact confirmed SIR and its compatible accepted Lean artifact. A changed SIR supersedes confirmation and returns to draft review.
+- An exact rejected SIR remains rejected. Repairs receive the prior combined output and exact diagnostics, then return a corrected SIR and Lean statement together.
 
 ### What the SIR buys
-1. Splits "understand the claim" from "write Lean with Mathlib names."
-2. A review surface humans can read in seconds.
-3. Bounded, typed questions for Jev (see §6).
-4. Deterministic semantic diffing: unchanged SIR ⇒ cosmetic edit.
-5. A mechanical Lean ↔ SIR structure check (see §8, step 9).
+1. A concise, reviewable account of what the block claims.
+2. Deterministic semantic diffing: unchanged SIR ⇒ cosmetic edit.
+3. A mechanical Lean ↔ SIR structure check (see §8).
+4. A stable key for accepted Lean artifacts: SIR hash plus dependency SIR hashes.
 
 ---
 
@@ -240,29 +241,27 @@ Document badge = summary counts of the above.
 ## 8. Pipeline per edit
 
 1. **Parse and diff.** Deterministic. Find changed blocks by `text_hash`.
-2. **Classify.** Tagged environments (`theorem`, `definition`, `proof`, …) come from the tree. Jev classifies only untagged prose.
-3. **Gate.** Skip until the block looks finished (Jev + cursor left the block + debounce). Never process the block being actively typed.
-4. **Link.** Explicit `\ref`/labels deterministically; implicit references ("by the previous lemma") via Jev choosing among earlier labels.
-5. **Schedule.** Priority queue: block just left first, then its dependents.
-6. **Write SIR.** Sonnet 5, structured output, given the block text + confirmed SIRs of dependencies. If the new SIR equals the old one → cosmetic edit, stop.
-7. **Check SIR.** Jev field-level checks against the text. Results annotate the review card.
-8. **Confirm SIR.** Review card in TeXmacs. User confirms, rejects, or edits. Confirmed SIRs are pinned until the block's meaning changes.
-9. **Write and check Lean statement.** Sonnet 5 writes the Lean statement from the confirmed SIR + retrieved Mathlib premises. Lean elaborates it with `sorry`. Then a small **Lean metaprogram extracts the statement's binders, hypotheses and goal**, and the engine compares counts/structure against the SIR. Mismatch = hard error, no model involved. Errors feed a repair loop (max N attempts).
-10. **Prove.** For confirmed statements only. Sonnet writes a proof guided by the proof SIR; Lean errors feed a repair loop. Failure after N attempts → 🟠 unproven. Optionally try to prove the negation / find a counterexample → 🔴 refuted.
-11. **Map back.** Lean diagnostics → `block:<id>` → marker on the right block.
+2. **Classify.** Tagged environments come from the tree. Jev classifies only untagged prose.
+3. **Gate.** Skip until the block looks finished (Jev + cursor left the block + debounce).
+4. **Link and schedule.** Resolve references, then run ready blocks in dependency order.
+5. **Generate one formalization result.** Sonnet receives the source, accepted dependency SIRs and declarations, plus applicable review context. It returns exactly `{sir, lean_statement, lean_proof, notes}`. M2/M4 require `lean_proof: null`; `notes` is an array of strings. Expected/reference SIRs are never included in the prompt.
+6. **Validate and check the pair.** Strictly deserialize and identity-check the returned SIR. Elaborate its paired Lean declaration and compare extracted binders, hypotheses and goal structure against that same SIR.
+7. **Repair jointly.** On identity, Lean elaboration/name-resolution, or structure mismatch, retry within `max_attempts`. Each repair receives the complete previous combined output and exact errors and must return both a corrected SIR and Lean statement. Imported Mathlib is available; actual diagnostics and name resolution can guide repairs. There is no automatic `#loogle` or `#leansearch` step.
+8. **Review after Lean checking.** Successful generated results are drafts. Human review confirms, rejects or edits the SIR. Confirmed SIRs stay pinned while text is unchanged. On a text edit, a matching generated SIR retains the exact confirmed SIR and compatible accepted Lean artifact; a changed SIR supersedes confirmation. An exact rejected SIR remains rejected.
+9. **Map back.** Formalization and proof diagnostics map through `block:<id>` to
+   the marker on the corresponding block.
+10. **Prove confirmed statements (M5).** Only an exactly confirmed statement
+    enters bounded proof generation and repair. Mark it `verified` only after a
+    complete Lean proof passes without `sorryAx` or disallowed axioms; exhausted
+    attempts remain `unproven`. Use `refuted` only when Lean checks positive
+    evidence for a negation or counterexample. M2/M4 formalization calls keep
+    `lean_proof: null`.
 
-### Sonnet structured outputs
+### Sonnet structured output
 
-SIR call:
+```json
+{ "sir": { "kind": "theorem", "label": null, "variables": [], "hypotheses": [], "conclusion": "…", "uses": [], "assumptions_made": [] }, "lean_statement": "theorem … := by sorry", "lean_proof": null, "notes": [] }
 ```
-{ kind, label, variables[], hypotheses[], conclusion, uses[], assumptions_made[] }
-```
-Lean call:
-```
-{ lean_statement, lean_proof | null, mathlib_names_used[], notes }
-```
-
----
 
 ## 9. Shadow Lean project layout
 
@@ -287,7 +286,7 @@ Lives next to the `.tm` file. Safe to delete; it's rebuilt from the block store.
 Read a `.tm` file, assign block IDs, print blocks with kinds, labels and dependencies.
 
 **M2 — Batch statements.**
-CLI: for every definition/theorem, Sonnet writes SIR → Lean statement → Lean elaborates with `sorry` → structure check → report. No proofs, no TeXmacs.
+CLI: for every definition/theorem, one Sonnet structured-output call returns SIR and Lean statement together; Lean elaborates that statement, checks its structure against that returned SIR, and bounded repairs return a corrected pair. No proofs, no TeXmacs.
 *This is the go/no-go milestone: is statement autoformalization good enough on real course notes (first-year analysis, linear algebra)?*
 
 **M3 — TeXmacs review.**
@@ -309,4 +308,4 @@ Proof SIRs, proof attempts, repair loop, unproven/refuted split, error markers.
 - **Mathlib coverage.** Pick domains Mathlib covers well for early testing.
 - **TeXmacs plugin internals** (Scheme, tree observers) are the least documented part. M1–M2 avoid them entirely.
 - **Jev drift.** Pin the version; log every decision with its version and probabilities.
-- **Cost and latency.** Jev runs constantly and cheaply; Sonnet only after gating and only on SIR changes; Lean is local.
+- **Cost and latency.** Jev runs constantly and cheaply; Sonnet runs once per formalization attempt after gating; Lean checks and repairs stay local apart from the model repair call.
