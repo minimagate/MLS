@@ -24,7 +24,7 @@
 
 (for-each mls-load-module
           '("mls-text" "mls-json" "mls-engine" "mls-document"
-            "mls-panel" "mls-review" "mls-formalize" "mls-live"))
+            "mls-panel" "mls-review" "mls-badges" "mls-formalize" "mls-live"))
 
 (menu-bind mls-menu
   ("Formalize document (replay...)" (mls-formalize-replay))

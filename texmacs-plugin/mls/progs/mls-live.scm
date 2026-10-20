@@ -169,9 +169,9 @@
 
 (define (mls-live-fresh-source url)
   "Assign IDs to new formal blocks, then serialize the full in-memory buffer,
-including its TeXmacs header/style."
+including its TeXmacs header/style but not the in-memory badge package."
   (mls-live-assign-ids! url)
-  (serialize-texmacs (buffer-get url)))
+  (serialize-texmacs (mls-badges-strip-tree (buffer-get url))))
 
 (define (mls-live-next-id)
   (set! mls-live-request-id (+ mls-live-request-id 1))
@@ -266,6 +266,8 @@ including its TeXmacs header/style."
       (set! mls-live-pending-open #f)
       (set! mls-live-pending-change #f)
       (set! mls-live-requests '())
+      (mls-badges-clear-dirty!)
+      (mls-badges-redraw)
       (set-message "MLS live session stopped" "MLS")))
   #t)
 
@@ -405,6 +407,8 @@ including its TeXmacs header/style."
              (let ((view (mls-live-merge-decision-annotations
                           (mls-json-get data "view") data)))
                (when (mls-view? view)
+                 (let ((dirty (mls-json-get data "dirty")))
+                   (mls-badges-set-dirty! (if (vector? dirty) (vector->list dirty) '())))
                  (set! mls-current-view view)
                  (set! mls-live-view view)
                  (set! mls-live-view-revision revision)
@@ -509,6 +513,7 @@ including its TeXmacs header/style."
      (set! mls-current-view view)
      (mls-live-with-suppressed-notifications
       (lambda () (buffer-set-body mls-panel-name (tm->tree (mls-panel-tree view)))))
+     (mls-badges-redraw)
      (let ((badge (mls-badge-text view)))
        (set-message badge "MLS")
        badge))))
@@ -584,3 +589,12 @@ including its TeXmacs header/style."
                  (set! mls-live-last-error "document changes are still syncing")
                  (set-message "MLS live: document changes are still syncing; retry this review action after the status updates" "MLS")
                  #f))))))
+
+(define (mls-live-retry uuid)
+  "Ask the daemon to formalize block UUID again at the acknowledged revision."
+  (and mls-live-connected?
+       (mls-live-review-ready?)
+       (mls-live-send "retry"
+                      `(("document" . ,mls-live-document)
+                        ("revision" . ,mls-live-revision)
+                        ("block" . ,uuid)))))

@@ -159,6 +159,7 @@
   "Show VIEW: store it, rebuild the panel, show it, and set the footer badge.
 Returns the badge text."
   (set! mls-current-view view)
+  (mls-badges-redraw)
   (buffer-set-body mls-panel-name (tm->tree (mls-panel-tree view)))
   (switch-to-buffer (string->url mls-panel-name))
   (let ((badge (mls-badge-text view)))

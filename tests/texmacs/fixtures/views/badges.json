@@ -1,0 +1,145 @@
+{
+ "protocol": 1,
+ "document": "/fixtures/badges.tm",
+ "counts": {
+  "not_formalized": 3,
+  "sir_drafted": 1,
+  "statement_confirmed": 4,
+  "formalization_error": 1
+ },
+ "proof_counts": {
+  "verified": 1,
+  "unproven": 1,
+  "refuted": 1
+ },
+ "needs_rerun": true,
+ "blocks": [
+  {
+   "block_id": "9f0c1a2e-3b4d-4c5e-8f60-718293a4b5c6",
+   "label": null,
+   "kind": "section",
+   "status": "not_formalized",
+   "review": "none",
+   "needs_rerun": false,
+   "message": "not a formal block",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": []
+  },
+  {
+   "block_id": "520997b8-c353-44cb-bba8-5e69745c0656",
+   "label": "def:cauchy",
+   "kind": "definition",
+   "status": "statement_confirmed",
+   "review": "confirmed",
+   "needs_rerun": false,
+   "message": "statement confirmed",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": []
+  },
+  {
+   "block_id": "e3220339-8782-4a00-8952-345d0005ab01",
+   "label": "lem:bounded",
+   "kind": "lemma",
+   "status": "sir_drafted",
+   "review": "none",
+   "needs_rerun": false,
+   "message": "draft ready for review",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": [],
+   "decision_differs": {
+    "value": {
+     "probability": 0.72
+    }
+   }
+  },
+  {
+   "block_id": "e688a3ab-4e5d-4b7e-9c57-c857a7e07741",
+   "label": "thm:conv-cauchy",
+   "kind": "theorem",
+   "status": "statement_confirmed",
+   "review": "confirmed",
+   "needs_rerun": false,
+   "message": "proof verified by Lean",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": [],
+   "proof_status": "verified"
+  },
+  {
+   "block_id": "7a8ae695-2a47-4e3d-b5cb-664566c24911",
+   "label": "thm:cauchy-conv",
+   "kind": "theorem",
+   "status": "not_formalized",
+   "review": "none",
+   "needs_rerun": false,
+   "message": "queued",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": []
+  },
+  {
+   "block_id": "20126ddc-bfe5-4ff3-a604-a8cf7a75f411",
+   "label": "cor:complete",
+   "kind": "corollary",
+   "status": "formalization_error",
+   "review": "none",
+   "needs_rerun": true,
+   "message": "Lean rejected the statement",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": [
+    "unknown identifier 'Real.complete'"
+   ]
+  },
+  {
+   "block_id": "2aefa595-4494-4a0f-9be1-eb81b12b7f0a",
+   "label": "prop:bounded-conv",
+   "kind": "proposition",
+   "status": "statement_confirmed",
+   "review": "confirmed",
+   "needs_rerun": false,
+   "message": "counterexample: (-1)^n",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": [],
+   "proof_status": "refuted"
+  },
+  {
+   "block_id": "37206045-447a-4559-8d22-dde83d5d212d",
+   "label": "prop:monotone",
+   "kind": "proposition",
+   "status": "statement_confirmed",
+   "review": "confirmed",
+   "needs_rerun": false,
+   "message": "proof search did not finish",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": [],
+   "proof_status": "unproven"
+  },
+  {
+   "block_id": "d6f2ab0b-d1b2-489d-8e75-6dfe3ee9bd70",
+   "label": "lem:monotone-sub",
+   "kind": "lemma",
+   "status": "not_formalized",
+   "review": "none",
+   "needs_rerun": false,
+   "message": "not formalized yet",
+   "sir": null,
+   "lean_statement": null,
+   "checks": [],
+   "errors": []
+  }
+ ]
+}
