@@ -153,7 +153,9 @@ current first: rendering a view switches to the status panel."
               (doc (car setup))
               (rec (cdr setup))
               (url (string->url doc)))
-         (mls-check "replay recordings are copied" (file-exists? (string-append rec "/call-0003.json")))
+         (mls-check "replay recordings are copied"
+                    (and (file-exists? (string-append rec "/call-0000.json"))
+                         (file-exists? (string-append rec "/call-0001.json"))))
          (mls-check "document copy has the fixture body unchanged"
                     (equal? (real-body-of (mls-test-file-text doc))
                             (real-body-of (mls-test-file-text (string-append (real-repo) "/tests/fixtures/lean/pipeline/success.tm")))))

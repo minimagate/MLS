@@ -322,7 +322,9 @@ refusal, with nothing written."
 
 (define (mls-go-to-block uuid)
   "Move the cursor to the carrier of block UUID in the document. Returns #t if found."
-  (let ((url mls-current-document))
+  (let ((url (if (and (defined? 'mls-live-connected?) mls-live-connected?)
+                 mls-live-url
+                 mls-current-document)))
     (cond ((not url) (mls-fail "no document is open in MLS"))
           (else
            (switch-to-buffer url)

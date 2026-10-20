@@ -7,11 +7,12 @@
 
 (define (mls-view-block uuid)
   "The block with block_id UUID in the current view, or #f."
-  (and mls-current-view
-       (let loop ((bs (vector->list (mls-json-get mls-current-view "blocks"))))
+  (let ((view (mls-panel-active-view)))
+    (and view
+       (let loop ((bs (vector->list (mls-json-get view "blocks"))))
          (cond ((null? bs) #f)
                ((equal? (mls-field (car bs) "block_id") uuid) (car bs))
-               (else (loop (cdr bs)))))))
+               (else (loop (cdr bs))))))))
 
 (define (mls-sir-strings sir key)
   (let ((v (mls-json-get sir key)))
@@ -45,6 +46,7 @@
                           "   Label: " (mls-block-label block))
            (mls-field block "message")
            "")
+     (mls-decision-lines block)
      (if (pair? sir)
          (append
           (list "Variables:")
@@ -156,7 +158,9 @@ document, then re-render. Must run inside mls-with-workdir."
 (define (mls-review-action uuid action fields)
   "Apply ACTION (confirm, reject or edit) to block UUID. FIELDS is the edit form
 as an alist of name to string (edit only). Returns #t on success."
-  (cond ((not mls-current-document)
+  (cond ((and (defined? 'mls-live-review-action) mls-live-connected?)
+         (mls-live-review-action uuid action fields))
+        ((not mls-current-document)
          (mls-fail "no document is loaded in MLS; run Show status first"))
         (else
          (mls-with-workdir

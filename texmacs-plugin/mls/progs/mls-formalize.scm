@@ -22,6 +22,14 @@
   (append (list "review-run" path)
           (if live? (list "--live") (list "--replay" dir))))
 
+(define (mls-batch-panel-available?)
+  "Do not let a one-shot command replace the panel owned by a live session."
+  (if (and (defined? 'mls-live-connected?) mls-live-connected?)
+      (begin
+        (mls-fail "stop the MLS live session before running Show status or Formalize")
+        #f)
+      #t))
+
 (define (mls-write-ids-and-retry url args live?)
   "Exit status 3 (missing_ids): assign ids with --write-ids, reload, retry once."
   (let ((written (mls-engine-call (list "--write-ids" (url->system url)) #f #f)))
@@ -37,6 +45,7 @@ or 'live. Returns #t when a view was rendered, #f after reporting an error."
     (cond ((and live? (not (mls-live-allowed?)))
            (mls-fail "live model calls are off; enable \"Allow live model calls\" in the MLS menu")
            #f)
+          ((not (mls-batch-panel-available?)) #f)
           ((and (not live?) (not (mls-check-replay-dir dir))) #f)
           (else
            (mls-with-workdir
@@ -62,17 +71,18 @@ or 'live. Returns #t when a view was rendered, #f after reporting an error."
 
 (tm-define (mls-show-status)
   (:synopsis "Show the MLS status of the document")
-  (mls-with-workdir
-   (lambda ()
-     (let ((url (mls-document-url)))
-       (and url
-            (mls-prepare-document! url)
-            (let ((r (mls-engine-call (list "review-status" (url->system url)) #f #t)))
-              (cond ((mls-result-view r)
-                     (set! mls-current-document url)
-                     (mls-render-view (mls-result-view r))
-                     #t)
-                    (else (mls-fail-result r)))))))))
+  (and (mls-batch-panel-available?)
+       (mls-with-workdir
+        (lambda ()
+          (let ((url (mls-document-url)))
+            (and url
+                 (mls-prepare-document! url)
+                 (let ((r (mls-engine-call (list "review-status" (url->system url)) #f #t)))
+                   (cond ((mls-result-view r)
+                          (set! mls-current-document url)
+                          (mls-render-view (mls-result-view r))
+                          #t)
+                         (else (mls-fail-result r))))))))))
 
 (tm-define (mls-formalize-replay)
   (:synopsis "Formalize the document from recorded replies")

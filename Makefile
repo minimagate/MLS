@@ -19,8 +19,11 @@ test-lean:
 	MLS_LEAN_TESTS=1 cargo test -p mls-engine --test pipeline -- --nocapture
 	MLS_LEAN_TESTS=1 cargo test -p mls-cli --test batch -- --nocapture
 	MLS_LEAN_TESTS=1 cargo test -p mls-cli --test review -- --nocapture
+	MLS_LEAN_TESTS=1 cargo test -p mls-engine --test proof confirmed_statement_reaches_verified_status_with_real_lean_when_enabled -- --exact --nocapture
+	MLS_LEAN_TESTS=1 cargo test -p mls-cli --test serve acceptance::real_daemon_drafts_confirms_proves_persists_and_reopens_a_saved_document -- --exact --nocapture
 
 test-texmacs:
 	cargo build -p mls-cli
 	sh tests/texmacs/run.sh
+	sh tests/texmacs/run-live.sh
 	MLS_TEXMACS_TESTS=1 cargo test -p mls-tm --test texmacs_roundtrip --test texmacs_oracle

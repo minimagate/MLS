@@ -24,14 +24,14 @@
 
 (for-each mls-load-module
           '("mls-text" "mls-json" "mls-engine" "mls-document"
-            "mls-panel" "mls-review" "mls-formalize"))
-
-(plugin-configure mls
-  (:require #t))
+            "mls-panel" "mls-review" "mls-formalize" "mls-live"))
 
 (menu-bind mls-menu
   ("Formalize document (replay...)" (mls-formalize-replay))
   ("Formalize document (live)" (mls-formalize-live))
+  ("Start live session" (mls-live-start))
+  ("Stop live session" (mls-live-stop))
+  ("Open live status panel" (mls-live-show-panel))
   ("Show status" (mls-show-status))
   ---
   ((check "Allow live model calls" "v" (mls-live-allowed?)) (mls-toggle-live)))

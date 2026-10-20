@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Small framed JSON-RPC peer for the TeXmacs live client acceptance test."""
+import json
+import os
+import re
+import sys
+import time
+
+log_path = os.environ["MLS_LIVE_STUB_LOG"]
+order_path = os.environ["MLS_LIVE_STUB_ORDER_LOG"]
+view_path = os.environ["MLS_LIVE_STUB_VIEW"]
+with open(view_path, encoding="utf-8") as source:
+    view = json.load(source)
+
+# Three confirmed blocks exercise every M5 ProofStatus value through the live panel path.
+proof_statuses = ("verified", "unproven", "refuted")
+view["counts"] = {"not_formalized": 0, "sir_drafted": 0,
+                  "statement_confirmed": 3, "formalization_error": 0}
+for block, status in zip(view["blocks"], proof_statuses):
+    block["status"] = "statement_confirmed"
+    block["review"] = "confirmed"
+    block["proof_status"] = status
+    block["proof"] = {"status": {"status": status}, "candidate": None, "attempts": 1,
+                      "diagnostics": []}
+    if status == "refuted":
+        block["proof"]["status"]["evidence"] = "checked counterexample"
+view["proof_counts"] = {"verified": 1, "unproven": 1, "refuted": 1}
+
+startup_carriers = {
+    "c654c3b7-09ef-48dd-add4-741f0790a71a",
+    "a98f524a-4ad6-4b0d-92d2-15b37d08f555",
+    "e32a226a-c78b-4321-9eba-e14b4c734ed4",
+    "be971836-2c21-4dfb-9128-ed7591e24db3",
+}
+carrier_pattern = re.compile(
+    r"<(?:\\)?with\s*\|\s*mls-id\s*\|\s*"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=[|>])"
+)
+live_new_carriers = None
+live_new_theorem_carrier = None
+live_latest_active = None
+
+
+def source_carriers(source):
+    return carrier_pattern.findall(source) if isinstance(source, str) else []
+
+
+def carrier_for_text(source, needle):
+    if not isinstance(source, str):
+        return None
+    for match in carrier_pattern.finditer(source):
+        close = source.find("</with>", match.end())
+        end = len(source) if close < 0 else close
+        body = " ".join(source[match.end():end].split())
+        if " ".join(needle.split()) in body:
+            return match.group(1)
+    return None
+
+
+def send(message):
+    payload = json.dumps(message, ensure_ascii=True, separators=(",", ":"))
+    sys.stdout.write("\x02verbatim:" + payload + "\x05")
+    sys.stdout.flush()
+
+
+def log(request):
+    with open(log_path, "a", encoding="ascii") as output:
+        output.write(json.dumps(request, ensure_ascii=True) + "\n")
+
+
+document = None
+revision = 0
+change_count = 0
+change_rejected = False
+cursor_revision_2_seen = False
+
+
+def record_order_violation(message):
+    with open(order_path, "a", encoding="ascii") as output:
+        output.write(message + "\n")
+
+
+for line in sys.stdin:
+    request = json.loads(line)
+    log(request)
+    method = request.get("method")
+    params = request.get("params", {})
+    if method == "initialize":
+        result = {"protocol": 1, "capabilities": {"asciiJson": True}}
+    elif method == "didOpen":
+        document = params["document"]
+        revision = params["revision"]
+        carriers = source_carriers(params.get("source"))
+        if len(carriers) != len(set(carriers)) or set(carriers) != startup_carriers:
+            send({"jsonrpc": "2.0", "id": request["id"],
+                  "error": {"code": -32002,
+                            "message": f"didOpen source carriers mismatch: {sorted(carriers)}"}})
+            continue
+        result = {"document": document, "revision": revision}
+        send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+        notifications = [
+            ("blockStatus", {
+                "view": view, "dirty": [], "usage": {},
+                "decision_annotations": {
+                    "fields": {"a98f524a-4ad6-4b0d-92d2-15b37d08f555": [
+                        {"field": "conclusion.quantifier", "reason": "disagrees",
+                         "evidence": None}
+                    ]},
+                    "differs": {"a98f524a-4ad6-4b0d-92d2-15b37d08f555": {
+                        "value": {"probability": 0.97}, "basis": "jev",
+                        "evidence": None, "truncated": False
+                    }}
+                }
+            }),
+            ("reviewRequest", {"blocks": []}),
+            ("diagnostics", {"source": [], "blocks": [], "fatal": None}),
+        ]
+        for name, data in notifications:
+            send({"jsonrpc": "2.0", "method": name,
+                  "params": {"document": document, "revision": revision, "data": data}})
+        continue
+    elif method == "didChange":
+        live_latest_active = params.get("active")
+        change_count += 1
+        if params["revision"] != revision + 1:
+            send({"jsonrpc": "2.0", "id": request["id"],
+                  "error": {"code": -32001, "message": "revision was not next"}})
+            continue
+        carriers = source_carriers(params.get("source"))
+        new_carriers = set(carriers) - startup_carriers
+        theorem_carrier = carrier_for_text(
+            params.get("source"), "A theorem added during the live session."
+        )
+        if (len(carriers) != len(set(carriers))
+                or not startup_carriers.issubset(set(carriers))
+                or len(new_carriers) != 1
+                or theorem_carrier not in new_carriers
+                or (live_new_carriers is not None and new_carriers != live_new_carriers)):
+            send({"jsonrpc": "2.0", "id": request["id"],
+                  "error": {"code": -32003,
+                            "message": f"didChange source carriers mismatch: {sorted(carriers)}"}})
+            continue
+        live_new_carriers = new_carriers
+        live_new_theorem_carrier = theorem_carrier
+        if change_count == 1:
+            change_rejected = True
+            # Keep the request pending long enough for a bad client to enqueue a
+            # cursor or review using the old acknowledged revision.
+            time.sleep(0.4)
+            send({"jsonrpc": "2.0", "id": request["id"],
+                  "error": {"code": -32000, "message": "test rejection"}})
+            continue
+        revision = params["revision"]
+        change_rejected = False
+        result = {"document": document, "revision": revision}
+        send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+        send({"jsonrpc": "2.0", "method": "blockStatus",
+              "params": {"document": document, "revision": revision,
+                         "data": {
+                             "view": view, "dirty": [], "usage": {},
+                             "decision_annotations": {
+                                 "fields": {
+                                     "a98f524a-4ad6-4b0d-92d2-15b37d08f555": [
+                                         {"field": "conclusion.quantifier",
+                                          "reason": "disagrees", "evidence": None}
+                                     ]
+                                 },
+                                 "differs": {
+                                     "a98f524a-4ad6-4b0d-92d2-15b37d08f555": {
+                                         "value": {"probability": 0.97},
+                                         "basis": "jev", "evidence": None,
+                                         "truncated": False
+                                     }
+                                 }
+                             }
+                         }}})
+        continue
+    elif method == "cursor":
+        if params.get("revision") == 2:
+            cursor_revision_2_seen = True
+        if change_rejected:
+            record_order_violation("cursor-before-didChange-ack")
+        if params.get("revision") != revision:
+            record_order_violation(f"cursor-wrong-revision:{params.get('revision')}:{revision}")
+        if (params.get("revision") == 2
+                and params.get("active") != live_latest_active):
+            record_order_violation(
+                f"cursor-not-latest:{params.get('active')}:{live_latest_active}"
+            )
+        result = {"document": document, "revision": params.get("revision")}
+    elif method == "review":
+        if change_rejected or params.get("revision") != revision:
+            record_order_violation(f"review-before-didChange-ack:{params.get('revision')}:{revision}")
+        result = {"document": document, "revision": params.get("revision")}
+    elif method == "shutdown":
+        if not cursor_revision_2_seen:
+            record_order_violation("missing-cursor-after-didChange-ack")
+        send({"jsonrpc": "2.0", "id": request["id"], "result": {"usage": {}, "fatal": None}})
+        break
+    else:
+        result = {"document": document, "revision": revision}
+    send({"jsonrpc": "2.0", "id": request["id"], "result": result})
