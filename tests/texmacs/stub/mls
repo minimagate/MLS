@@ -1,0 +1,71 @@
+#!/bin/sh
+# Stub `mls` engine for the TeXmacs plugin tests. It logs each call as one line
+# (CALL <arg>... LIVE=<MLS_LIVE or unset>) to $MLS_STUB_LOG and then acts only on
+# these variables:
+#   MLS_STUB_VIEW            JSON copied to --output on success
+#   MLS_STUB_SEQ             file of exit statuses for successive review-run calls
+#                            (one per line; 0 once the file is empty); status 3
+#                            writes a missing_ids error object
+#   MLS_STUB_WRITE_IDS_FROM  file copied over the document by --write-ids
+#   MLS_STUB_RUN_FROM        file copied over the document by review-run
+#   MLS_STUB_FAIL            nonzero status returned by every call, with an error object
+# Side outputs for the tests, next to $MLS_STUB_LOG:
+#   DIRMODE line             mode of the --output directory (the plugin's private directory)
+#   $MLS_STUB_LOG.write-ids-seen  the document as --write-ids saw it
+#   $MLS_STUB_LOG.run-seen        the document as review-run saw it
+#   $MLS_STUB_LOG.sir             a --sir file, copied when given
+set -u
+{
+  printf 'CALL'
+  for a in "$@"; do printf ' <%s>' "$a"; done
+  printf ' LIVE=%s\n' "${MLS_LIVE-unset}"
+} >> "${MLS_STUB_LOG:-/dev/null}"
+
+cmd=${1:-}
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--output" ]; then out=$a; fi
+  if [ "$prev" = "--sir" ] && [ -n "${MLS_STUB_LOG:-}" ]; then cp "$a" "$MLS_STUB_LOG.sir"; fi
+  prev=$a
+done
+
+if [ -n "$out" ] && [ -n "${MLS_STUB_LOG:-}" ]; then
+  printf 'DIRMODE %s\n' "$(ls -ld "$(dirname "$out")" | cut -c1-10)" >> "$MLS_STUB_LOG"
+fi
+if [ "$cmd" = "--write-ids" ] && [ -n "${MLS_STUB_LOG:-}" ]; then
+  cp "$2" "$MLS_STUB_LOG.write-ids-seen"
+fi
+if [ "$cmd" = "review-run" ] && [ -n "${MLS_STUB_LOG:-}" ]; then
+  cp "$2" "$MLS_STUB_LOG.run-seen"
+fi
+
+if [ -n "${MLS_STUB_FAIL:-}" ]; then
+  [ -n "$out" ] && printf '{"protocol":1,"error":"stub_failure","message":"stub failed on purpose"}\n' > "$out"
+  echo "stub: failure requested" >&2
+  exit "$MLS_STUB_FAIL"
+fi
+
+if [ "$cmd" = "--write-ids" ]; then
+  if [ -n "${MLS_STUB_WRITE_IDS_FROM:-}" ]; then cp "$MLS_STUB_WRITE_IDS_FROM" "$2"; fi
+  exit 0
+fi
+
+status=0
+if [ "$cmd" = "review-run" ] && [ -n "${MLS_STUB_SEQ:-}" ] && [ -s "$MLS_STUB_SEQ" ]; then
+  status=$(head -n 1 "$MLS_STUB_SEQ")
+  tail -n +2 "$MLS_STUB_SEQ" > "$MLS_STUB_SEQ.next" && mv "$MLS_STUB_SEQ.next" "$MLS_STUB_SEQ"
+fi
+
+if [ "$cmd" = "review-run" ] && [ -n "${MLS_STUB_RUN_FROM:-}" ]; then
+  cp "$MLS_STUB_RUN_FROM" "$2"
+fi
+
+if [ "$status" = 3 ]; then
+  [ -n "$out" ] && printf '{"protocol":1,"error":"missing_ids","message":"blocks lack mls-id"}\n' > "$out"
+  echo "mls: missing_ids" >&2
+  exit 3
+fi
+
+[ -n "$out" ] && cp "$MLS_STUB_VIEW" "$out"
+exit 0

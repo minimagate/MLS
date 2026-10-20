@@ -1,0 +1,15 @@
+{"protocol": 1, "document": "/x.tm",
+ "counts": {"not_formalized": 0, "sir_drafted": 0, "statement_confirmed": 0, "formalization_error": 1},
+ "needs_rerun": false,
+ "blocks": [
+  {"block_id": "<action|x|(system \"touch PWN_JSON0\")>", "label": "<action|x|(system \"touch PWN_JSON1\")>",
+   "kind": "<extern|x|(system \"touch PWN_JSON2\")>", "status": "formalization_error", "review": "none",
+   "needs_rerun": false,
+   "message": "<\\action|x|(system \"touch PWN_JSON3\")> <with|color|red|x> \\u0041",
+   "sir": {"kind": "definition", "label": "l", "variables": [{"name": "<action|x|(system \"touch PWN_JSON4\")>", "type": "set"}],
+           "hypotheses": ["(system \"touch PWN_JSON5\")"], "conclusion": "<\\action|x|(system \"touch PWN_JSON6\")>",
+           "assumptions_made": [], "uses": ["(eval (system \"touch PWN_JSON7\"))"]},
+   "lean_statement": "theorem x : <action|a|(system \"touch PWN_JSON8\")> := by sorry",
+   "checks": [{"field": "f<action|x|(system \"touch PWN_JSON9\")>", "state": "matched", "scope": "s", "detail": "<hover-balloon|x|y>"}],
+   "errors": ["<action|x|(system \"touch PWN_JSON10\")>", "\u001b[31mesc\u0007 \ud800 lone \udc00 \u0000 nul"]}
+ ]}
