@@ -421,176 +421,50 @@ pub fn run_batch_reviewed(
     }
     for id in order {
         let block = by_id[&id];
-        let mut report = empty_report(block);
         let failed_dependency = block.deps.iter().any(|dependency| {
             by_id
                 .get(dependency)
                 .is_some_and(|candidate| source_kind(candidate.kind).is_some())
                 && !accepted.contains_key(dependency)
         });
-        if failed_dependency {
-            report
-                .errors
-                .push("a formal statement dependency was not accepted speculatively".into());
-            reports.push(report);
-            continue;
-        }
-        let dependencies: Vec<_> = block
+        let dependencies: Vec<AcceptedDependency> = block
             .deps
             .iter()
-            .filter_map(|dep| accepted.get(dep))
+            .filter_map(|dep| accepted.get(dep).cloned())
             .collect();
-        let expected_uses: Vec<_> = block
+        let expected_uses: Vec<String> = block
             .deps
             .iter()
             .filter_map(|dep| labels.get(dep))
             .cloned()
             .collect();
-        let dependency_sirs: Vec<Sir> = dependencies
-            .iter()
-            .map(|dependency| dependency.sir.clone())
-            .collect();
-        let Some(canonical) = analysis.canonical_text(block.id) else {
-            report.errors.push(
-                "canonicalization_failed: the block has no canonical text; it was not sent to a model"
-                    .into(),
-            );
-            reports.push(report);
-            continue;
+        let reusable = |key: &str| {
+            review
+                .cached_lean(id)
+                .filter(|cached| cached.cache_key == key)
+                .map(|cached| cached.declaration.clone())
         };
-        let context = SirContext {
-            block,
-            canonical,
-            review,
-            dependencies: &dependency_sirs,
-            max_tokens: config.sir_max_tokens,
-        };
-        let Some((sir, origin)) = decide_sir(models, &context, &mut usage, &mut report) else {
-            reports.push(report);
-            continue;
-        };
-        report.sir_origin = Some(origin.as_str().into());
-        report.sir_hash = Some(sir.semantic_hash());
-        report.sir = Some(sir.clone());
-        let identity = validate_sir_identity(block, &sir, &expected_uses);
-        if !identity.is_empty() {
-            report.errors.extend(identity);
-            reports.push(report);
-            continue;
+        let output = formalize_block(
+            models,
+            checker,
+            config,
+            &mut usage,
+            BlockInput {
+                block,
+                canonical: analysis.canonical_text(id),
+                failed_dependency,
+                dependencies: &dependencies,
+                expected_uses: &expected_uses,
+                review,
+                cached_sir: None,
+                lean_lookup: &reusable,
+                reuse_generated_lean: false,
+            },
+        );
+        if let Some(dependency) = output.accepted {
+            accepted.insert(id, dependency);
         }
-        let cache_key = cache_key(&sir, block, &accepted);
-        report.cache_key = Some(cache_key.clone());
-        let declaration_name = declaration_name(id);
-        // A confirmed SIR whose cached declaration still matches its cache key skips generation.
-        // The cached check does not consume an attempt.
-        let cached = match (origin.is_human_confirmed(), review.cached_lean(id)) {
-            (true, Some(cached)) if cached.cache_key == cache_key => {
-                check_cached_declaration(checker, id, &declaration_name, &sir, cached)
-            }
-            _ => None,
-        };
-        if let Some((declaration, checks)) = cached {
-            report.lean_origin = Some("cache".into());
-            report.elaborated = true;
-            report.complete_structure = is_complete(&checks);
-            report.checks = checks;
-            report.accepted_speculatively = true;
-            report.lean_statement = Some(declaration.clone());
-            accepted.insert(
-                id,
-                AcceptedDependency {
-                    name: declaration_name,
-                    declaration,
-                    sir: sir.clone(),
-                },
-            );
-        } else {
-            let mut feedback = Vec::new();
-            for attempt in 0..config.max_attempts.max(1) {
-                report.attempts += 1;
-                report.lean_statement = None;
-                report.elaborated = false;
-                report.checks.clear();
-                report.lean_diagnostics.clear();
-                match generate_lean(
-                    models,
-                    LeanGeneration {
-                        block,
-                        sir: &sir,
-                        name: &declaration_name,
-                        attempt,
-                        feedback: &feedback,
-                        dependencies: &dependencies,
-                        max_tokens: config.lean_max_tokens,
-                    },
-                    &mut usage,
-                ) {
-                    Err(error) => feedback = vec![error.to_string()],
-                    Ok(candidate) => {
-                        report.lean_statement = Some(candidate.clone());
-                        match checker.check(id, &declaration_name, &candidate) {
-                            Err(error) => {
-                                report.lean_diagnostics = checker
-                                    .take_diagnostics()
-                                    .into_iter()
-                                    .map(|diagnostic| LeanDiagnostic {
-                                        block_id: id,
-                                        source_start: block.source_start,
-                                        source_end: block.source_end,
-                                        line: diagnostic.pos.map(|position| position.line),
-                                        column: diagnostic.pos.map(|position| position.column),
-                                        message: diagnostic.data,
-                                    })
-                                    .collect();
-                                feedback = vec![format!("Lean: {error}")];
-                                feedback.extend(admission_hint(&error));
-                            }
-                            Ok(extracted) => {
-                                report.elaborated = true;
-                                report.checks =
-                                    compare_structure(&sir, &declaration_name, &extracted);
-                                let hard_mismatch = report
-                                    .checks
-                                    .iter()
-                                    .any(|c| c.hard && c.state == CheckState::Mismatch);
-                                if let Err(error) = checker.finish(!hard_mismatch) {
-                                    feedback = vec![error];
-                                    continue;
-                                }
-                                if !hard_mismatch {
-                                    report.accepted_speculatively = true;
-                                    report.lean_origin = Some("generated".into());
-                                    report.complete_structure = is_complete(&report.checks);
-                                    accepted.insert(
-                                        id,
-                                        AcceptedDependency {
-                                            name: declaration_name.clone(),
-                                            declaration: candidate,
-                                            sir: sir.clone(),
-                                        },
-                                    );
-                                    feedback.clear();
-                                    break;
-                                }
-                                feedback = report
-                                    .checks
-                                    .iter()
-                                    .filter(|c| c.state == CheckState::Mismatch)
-                                    .map(|c| format!("{}: {}", c.field, c.detail))
-                                    .collect();
-                            }
-                        }
-                    }
-                }
-            }
-            report.errors.extend(feedback);
-        }
-        report.status = match (report.accepted_speculatively, origin.is_human_confirmed()) {
-            (true, true) => BlockStatus::StatementConfirmed,
-            (true, false) => BlockStatus::SirDrafted,
-            (false, _) => BlockStatus::FormalizationError,
-        };
-        reports.push(report);
+        reports.push(output.report);
     }
     // A confirmed block is statement_confirmed only once its formal dependencies are too. Reports
     // are in dependency order, so each block sees the final status of its dependencies.
@@ -600,6 +474,230 @@ pub fn run_batch_reviewed(
         blocks: reports,
         usage,
     })
+}
+
+/// Everything one block's formalization reads. The caller settles the dependencies first.
+pub(crate) struct BlockInput<'a> {
+    /// The block to formalize.
+    pub block: &'a Block,
+    /// Canonical text of the block, or `None` when canonicalization failed.
+    pub canonical: Option<&'a [u8]>,
+    /// A formal dependency has no accepted statement, so the block is blocked.
+    pub failed_dependency: bool,
+    /// Accepted formal dependencies, in `block.deps` order.
+    pub dependencies: &'a [AcceptedDependency],
+    /// The labels that the SIR `uses` must list, in dependency order.
+    pub expected_uses: &'a [String],
+    /// Human decisions in effect for the document.
+    pub review: &'a ReviewStore,
+    /// A reusable SIR for this block. It is ignored when the block has a rejected SIR.
+    pub cached_sir: Option<&'a Sir>,
+    /// Looks up an accepted declaration for a section 4 cache key.
+    pub lean_lookup: &'a dyn Fn(&str) -> Option<String>,
+    /// Whether a declaration found for a generated SIR may be reused. Confirmed SIRs always may.
+    pub reuse_generated_lean: bool,
+}
+
+/// The result of formalizing one block.
+pub(crate) struct BlockOutput {
+    /// The per-block report.
+    pub report: BlockReport,
+    /// The statement this block accepted speculatively, for its dependents.
+    pub accepted: Option<AcceptedDependency>,
+    /// The SIR came from a model call that does not depend on a rejection, so it may be cached.
+    pub sir_cacheable: bool,
+}
+
+/// Formalize one block: choose its SIR, check identity, reuse or generate a Lean statement with
+/// bounded repair, and compare the structure. Shared by the batch pipeline and the live runner.
+pub(crate) fn formalize_block(
+    models: &mut impl ModelClient,
+    checker: &mut impl StatementChecker,
+    config: PipelineConfig,
+    usage: &mut UsageSummary,
+    input: BlockInput<'_>,
+) -> BlockOutput {
+    let block = input.block;
+    let id = block.id;
+    let mut report = empty_report(block);
+    if input.failed_dependency {
+        report
+            .errors
+            .push("a formal statement dependency was not accepted speculatively".into());
+        return BlockOutput {
+            report,
+            accepted: None,
+            sir_cacheable: false,
+        };
+    }
+    let Some(canonical) = input.canonical else {
+        report.errors.push(
+            "canonicalization_failed: the block has no canonical text; it was not sent to a model"
+                .into(),
+        );
+        return BlockOutput {
+            report,
+            accepted: None,
+            sir_cacheable: false,
+        };
+    };
+    let dependency_sirs: Vec<Sir> = input
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.sir.clone())
+        .collect();
+    let context = SirContext {
+        block,
+        canonical,
+        review: input.review,
+        dependencies: &dependency_sirs,
+        max_tokens: config.sir_max_tokens,
+        cached: input.cached_sir,
+    };
+    let Some(decision) = decide_sir(models, &context, usage, &mut report) else {
+        return BlockOutput {
+            report,
+            accepted: None,
+            sir_cacheable: false,
+        };
+    };
+    let SirDecision {
+        sir,
+        origin,
+        cacheable,
+    } = decision;
+    report.sir_origin = Some(origin.as_str().into());
+    report.sir_hash = Some(sir.semantic_hash());
+    report.sir = Some(sir.clone());
+    let identity = validate_sir_identity(block, &sir, input.expected_uses);
+    if !identity.is_empty() {
+        report.errors.extend(identity);
+        return BlockOutput {
+            report,
+            accepted: None,
+            sir_cacheable: false,
+        };
+    }
+    let dependency_hashes: Vec<(BlockId, String)> = input
+        .dependencies
+        .iter()
+        .map(|dependency| (dependency.id, dependency.sir.semantic_hash()))
+        .collect();
+    let cache_key = cache_key_from_hashes(&sir.semantic_hash(), &dependency_hashes);
+    report.cache_key = Some(cache_key.clone());
+    let declaration_name = declaration_name(id);
+    // A declaration is reused only after Lean re-checks it against this SIR.
+    let reusable = if origin.is_human_confirmed() || input.reuse_generated_lean {
+        (input.lean_lookup)(&cache_key)
+    } else {
+        None
+    };
+    let cached = reusable.and_then(|declaration| {
+        check_cached_declaration(checker, id, &declaration_name, &sir, &declaration)
+    });
+    let mut accepted = None;
+    if let Some((declaration, checks)) = cached {
+        report.lean_origin = Some("cache".into());
+        report.elaborated = true;
+        report.complete_structure = is_complete(&checks);
+        report.checks = checks;
+        report.accepted_speculatively = true;
+        report.lean_statement = Some(declaration.clone());
+        accepted = Some(AcceptedDependency {
+            id,
+            name: declaration_name,
+            declaration,
+            sir: sir.clone(),
+        });
+    } else {
+        let dependency_refs: Vec<&AcceptedDependency> = input.dependencies.iter().collect();
+        let mut feedback = Vec::new();
+        for attempt in 0..config.max_attempts.max(1) {
+            report.attempts += 1;
+            report.lean_statement = None;
+            report.elaborated = false;
+            report.checks.clear();
+            report.lean_diagnostics.clear();
+            match generate_lean(
+                models,
+                LeanGeneration {
+                    block,
+                    sir: &sir,
+                    name: &declaration_name,
+                    attempt,
+                    feedback: &feedback,
+                    dependencies: &dependency_refs,
+                    max_tokens: config.lean_max_tokens,
+                },
+                usage,
+            ) {
+                Err(error) => feedback = vec![error.to_string()],
+                Ok(candidate) => {
+                    report.lean_statement = Some(candidate.clone());
+                    match checker.check(id, &declaration_name, &candidate) {
+                        Err(error) => {
+                            report.lean_diagnostics = checker
+                                .take_diagnostics()
+                                .into_iter()
+                                .map(|diagnostic| LeanDiagnostic {
+                                    block_id: id,
+                                    source_start: block.source_start,
+                                    source_end: block.source_end,
+                                    line: diagnostic.pos.map(|position| position.line),
+                                    column: diagnostic.pos.map(|position| position.column),
+                                    message: diagnostic.data,
+                                })
+                                .collect();
+                            feedback = vec![format!("Lean: {error}")];
+                            feedback.extend(admission_hint(&error));
+                        }
+                        Ok(extracted) => {
+                            report.elaborated = true;
+                            report.checks = compare_structure(&sir, &declaration_name, &extracted);
+                            let hard_mismatch = report
+                                .checks
+                                .iter()
+                                .any(|c| c.hard && c.state == CheckState::Mismatch);
+                            if let Err(error) = checker.finish(!hard_mismatch) {
+                                feedback = vec![error];
+                                continue;
+                            }
+                            if !hard_mismatch {
+                                report.accepted_speculatively = true;
+                                report.lean_origin = Some("generated".into());
+                                report.complete_structure = is_complete(&report.checks);
+                                accepted = Some(AcceptedDependency {
+                                    id,
+                                    name: declaration_name.clone(),
+                                    declaration: candidate,
+                                    sir: sir.clone(),
+                                });
+                                feedback.clear();
+                                break;
+                            }
+                            feedback = report
+                                .checks
+                                .iter()
+                                .filter(|c| c.state == CheckState::Mismatch)
+                                .map(|c| format!("{}: {}", c.field, c.detail))
+                                .collect();
+                        }
+                    }
+                }
+            }
+        }
+        report.errors.extend(feedback);
+    }
+    report.status = match (report.accepted_speculatively, origin.is_human_confirmed()) {
+        (true, true) => BlockStatus::StatementConfirmed,
+        (true, false) => BlockStatus::SirDrafted,
+        (false, _) => BlockStatus::FormalizationError,
+    };
+    BlockOutput {
+        report,
+        accepted,
+        sir_cacheable: cacheable,
+    }
 }
 
 impl UsageSummary {
@@ -650,11 +748,13 @@ fn empty_report(block: &Block) -> BlockReport {
     }
 }
 
+/// A formal block whose statement was accepted speculatively, as seen by its dependents.
 #[derive(Clone)]
-struct AcceptedDependency {
-    name: String,
-    declaration: String,
-    sir: Sir,
+pub(crate) struct AcceptedDependency {
+    pub(crate) id: BlockId,
+    pub(crate) name: String,
+    pub(crate) declaration: String,
+    pub(crate) sir: Sir,
 }
 
 fn formal_order(analysis: &Analysis) -> Result<Vec<BlockId>, PipelineError> {
@@ -775,6 +875,17 @@ struct SirContext<'a> {
     review: &'a ReviewStore,
     dependencies: &'a [Sir],
     max_tokens: u32,
+    /// A SIR generated earlier for the same inputs. Used instead of a model call, unless the
+    /// block has a rejected SIR, which must be regenerated with its note.
+    cached: Option<&'a Sir>,
+}
+
+/// The SIR chosen for a block and how it was obtained.
+struct SirDecision {
+    sir: Sir,
+    origin: SirOrigin,
+    /// The SIR came from a model call that was not conditioned on a rejection, so it may be cached.
+    cacheable: bool,
 }
 
 /// Choose the SIR in effect for a block. A confirmed or edited SIR whose block text is unchanged
@@ -785,7 +896,7 @@ fn decide_sir(
     context: &SirContext<'_>,
     usage: &mut UsageSummary,
     report: &mut BlockReport,
-) -> Option<(Sir, SirOrigin)> {
+) -> Option<SirDecision> {
     let block = context.block;
     let entry = context.review.entry(block.id);
     report.previously_rejected = matches!(entry, Some(ReviewEntry::Rejected { .. }));
@@ -802,7 +913,11 @@ fn decide_sir(
         } else {
             SirOrigin::Confirmed
         };
-        return Some((sir.clone(), origin));
+        return Some(SirDecision {
+            sir: sir.clone(),
+            origin,
+            cacheable: false,
+        });
     }
     let Ok(text) = std::str::from_utf8(context.canonical) else {
         report
@@ -814,21 +929,25 @@ fn decide_sir(
         Some(ReviewEntry::Rejected { sir, .. }) => Some(sir),
         _ => None,
     };
-    let generated = match generate_sir(
-        models,
-        block,
-        text,
-        context.dependencies,
-        rejected,
-        context.max_tokens,
-        usage,
-    ) {
-        Ok(sir) => sir,
-        Err(error) => {
-            report.errors.push(error.to_string());
-            return None;
-        }
+    let (generated, from_model) = match (rejected, context.cached) {
+        (None, Some(cached)) => (cached.clone(), false),
+        _ => match generate_sir(
+            models,
+            block,
+            text,
+            context.dependencies,
+            rejected,
+            context.max_tokens,
+            usage,
+        ) {
+            Ok(sir) => (sir, true),
+            Err(error) => {
+                report.errors.push(error.to_string());
+                return None;
+            }
+        },
     };
+    let cacheable = from_model && rejected.is_none();
     if let Some(previous) = rejected
         && previous.semantic_hash() == generated.semantic_hash()
     {
@@ -845,7 +964,11 @@ fn decide_sir(
     {
         if generated.semantic_hash() == *sir_hash {
             report.cosmetic_reconfirmation = true;
-            return Some((confirmed.clone(), SirOrigin::Confirmed));
+            return Some(SirDecision {
+                sir: confirmed.clone(),
+                origin: SirOrigin::Confirmed,
+                cacheable,
+            });
         }
         let changed: Vec<_> = confirmed
             .diff(&generated)
@@ -855,22 +978,11 @@ fn decide_sir(
             .collect();
         report.superseded_confirmation = Some(format!("changed fields: {}", changed.join(", ")));
     }
-    Some((generated, SirOrigin::Generated))
-}
-
-/// Cache key of spec section 4: this block's SIR hash, then the id and SIR hash of each formal
-/// dependency in dependency order, joined by newlines and hashed with SHA-256.
-fn cache_key(sir: &Sir, block: &Block, accepted: &HashMap<BlockId, AcceptedDependency>) -> String {
-    let dependencies: Vec<(BlockId, String)> = block
-        .deps
-        .iter()
-        .filter_map(|dependency| {
-            accepted
-                .get(dependency)
-                .map(|entry| (*dependency, entry.sir.semantic_hash()))
-        })
-        .collect();
-    cache_key_from_hashes(&sir.semantic_hash(), &dependencies)
+    Some(SirDecision {
+        sir: generated,
+        origin: SirOrigin::Generated,
+        cacheable,
+    })
 }
 
 /// The section 4 cache key from a block's SIR hash and the `(id, SIR hash)` pairs of its formal
@@ -892,15 +1004,15 @@ fn check_cached_declaration(
     id: BlockId,
     name: &str,
     sir: &Sir,
-    cached: &CachedLean,
+    declaration: &str,
 ) -> Option<(String, Vec<StructureCheck>)> {
-    let extracted = checker.check(id, name, &cached.declaration).ok()?;
+    let extracted = checker.check(id, name, declaration).ok()?;
     let checks = compare_structure(sir, name, &extracted);
     let hard_mismatch = checks
         .iter()
         .any(|check| check.hard && check.state == CheckState::Mismatch);
     checker.finish(!hard_mismatch).ok()?;
-    (!hard_mismatch).then(|| (cached.declaration.clone(), checks))
+    (!hard_mismatch).then(|| (declaration.to_owned(), checks))
 }
 
 /// Whether no structure-scoped check is unchecked.
