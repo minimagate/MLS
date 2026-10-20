@@ -1,5 +1,6 @@
 //! Lossless parsing, block extraction, and ID insertion for TeXmacs native syntax.
 
+mod canonical;
 mod parser;
 mod writer;
 
@@ -20,6 +21,35 @@ pub struct Analysis {
     /// Planned source wrappers for blocks that do not yet have persisted IDs.
     #[serde(skip)]
     pub insertions: Vec<IdInsertion>,
+    /// Canonical text of each block, keyed by block ID. Read it with [`Analysis::canonical_text`].
+    #[serde(skip)]
+    pub canonical: HashMap<BlockId, Vec<u8>>,
+}
+
+impl Analysis {
+    /// Return the layout-independent canonical text of a block, or `None` for an unknown ID or
+    /// for a block whose canonicalization failed (reported as `canonicalization_failed`).
+    ///
+    /// The text is what `Block::text_hash` hashes and what model prompts receive. It does not
+    /// change when TeXmacs re-serializes the block (indentation, line breaks, short or long
+    /// form), and it omits `mls-id` carriers. Source spans still locate the raw bytes.
+    #[must_use]
+    pub fn canonical_text(&self, id: BlockId) -> Option<&[u8]> {
+        self.canonical.get(&id).map(Vec::as_slice)
+    }
+}
+
+/// Canonical text of one block's source slice, as [`Analysis::canonical_text`] reports it.
+///
+/// The slice is parsed on its own. This is exposed for the TeXmacs oracle tests, which compare
+/// it with TeXmacs' own reader; production code reads [`Analysis::canonical_text`].
+///
+/// # Errors
+///
+/// Returns [`ParseError`] when the slice has no canonical form.
+#[doc(hidden)]
+pub fn canonical_block_text(slice: &[u8]) -> Result<Vec<u8>, ParseError> {
+    canonical::block_text(slice)
 }
 
 /// An ID wrapper to insert around an unannotated source span.
@@ -48,15 +78,12 @@ pub fn analyze(document: &Document<'_>) -> Analysis {
     let body = document
         .nodes()
         .iter()
-        .find(|node| node.name(document.source()) == Some(b"body"));
+        .find(|node| node.name() == Some(b"body"));
     if let Some(body) = body {
         collect_candidates(body.children(), document.source(), None, &mut candidates);
         collect_body_prose(body.children(), document.source(), &mut candidates);
         candidates.sort_by_key(|candidate| candidate.span.start);
     }
-    let mut carrier_ranges = Vec::new();
-    collect_carrier_ranges(document.nodes(), document.source(), &mut carrier_ranges);
-
     let mut diagnostics = Vec::new();
     if body.is_none() {
         diagnostics.push(Diagnostic {
@@ -108,6 +135,7 @@ pub fn analyze(document: &Document<'_>) -> Analysis {
             }
         }
     }
+    let mut canonical_texts = HashMap::new();
     let blocks = candidates
         .iter()
         .map(|candidate| {
@@ -134,10 +162,30 @@ pub fn analyze(document: &Document<'_>) -> Analysis {
                 }
             }
             let span = candidate.span;
+            let source = &document.source()[span.start..span.end];
+            // A block span comes from a successful parse, so this normally succeeds. When it does
+            // not, the block has no canonical text: it is reported, and it is never hashed from
+            // raw bytes, which could then equal the hash of a different tree.
+            let text_hash = match canonical::block_text(source) {
+                Ok(canonical) => {
+                    let hash = source_hash(&canonical);
+                    canonical_texts.insert(candidate.id.unwrap(), canonical);
+                    hash
+                }
+                Err(error) => {
+                    diagnostics.push(Diagnostic {
+                        code: "canonicalization_failed".into(),
+                        message: format!("block text has no canonical form: {error}"),
+                        source_start: span.start,
+                        source_end: span.end,
+                    });
+                    source_hash(&[b"canonicalization_failed\0".as_slice(), source].concat())
+                }
+            };
             Block {
                 id: candidate.id.unwrap(),
                 kind: candidate.kind,
-                text_hash: normalized_source_hash(document.source(), span, &carrier_ranges),
+                text_hash,
                 label: candidate.label.clone(),
                 deps,
                 source_start: span.start,
@@ -150,6 +198,7 @@ pub fn analyze(document: &Document<'_>) -> Analysis {
         blocks,
         diagnostics,
         insertions,
+        canonical: canonical_texts,
     }
 }
 
@@ -164,7 +213,7 @@ fn collect_candidates(
             continue;
         }
         if matches!(
-            node.name(source),
+            node.name(),
             Some(b"inactive" | b"initial" | b"references" | b"collection" | b"doc-data")
         ) {
             continue;
@@ -175,7 +224,7 @@ fn collect_candidates(
             collect_candidates(node.children(), source, carried_id, out);
             continue;
         }
-        if let Some(kind) = node_kind(node.name(source)) {
+        if let Some(kind) = node_kind(node.name()) {
             let mut label = None;
             let mut labels = Vec::new();
             let mut refs = Vec::new();
@@ -246,9 +295,9 @@ fn collect_prose_sequence(
             run.clear();
         };
     for node in nodes {
-        if node_kind(node.name(source)).is_some() {
+        if node_kind(node.name()).is_some() {
             flush(&mut run, &mut available_id, out);
-        } else if contains_formal_block(node, source) {
+        } else if contains_formal_block(node) {
             flush(&mut run, &mut available_id, out);
             collect_prose_sequence(node.children(), source, available_id.take(), out);
         } else if let Some(id) = with_id(node, source) {
@@ -339,15 +388,16 @@ fn is_backslash_escaped(source: &[u8], offset: usize) -> bool {
     slashes % 2 == 1
 }
 
-fn contains_formal_block(node: &Node, source: &[u8]) -> bool {
-    node.args().iter().flatten().any(|child| {
-        node_kind(child.name(source)).is_some() || contains_formal_block(child, source)
-    })
+fn contains_formal_block(node: &Node) -> bool {
+    node.args()
+        .iter()
+        .flatten()
+        .any(|child| node_kind(child.name()).is_some() || contains_formal_block(child))
 }
 
 fn collect_invalid_ids(nodes: &[Node], source: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     for node in nodes {
-        if node.name(source) == Some(b"with")
+        if node.name() == Some(b"with")
             && has_id_key(node, source)
             && with_id(node, source).is_none()
         {
@@ -365,57 +415,8 @@ fn collect_invalid_ids(nodes: &[Node], source: &[u8], diagnostics: &mut Vec<Diag
     }
 }
 
-fn collect_carrier_ranges(nodes: &[Node], source: &[u8], ranges: &mut Vec<Span>) {
-    for node in nodes {
-        if with_id(node, source).is_some() {
-            if node.args().len() == 3
-                && let (Some(first), Some(last)) = (node.children().first(), node.children().last())
-            {
-                let wrapper = node.span();
-                ranges.push(Span {
-                    start: wrapper.start,
-                    end: first.span().start,
-                });
-                ranges.push(Span {
-                    start: last.span().end,
-                    end: wrapper.end,
-                });
-            } else {
-                for pair in node.args()[..node.args().len() - 1].as_chunks::<2>().0 {
-                    if plain_bytes(&pair[0], source) == Some(b"mls-id")
-                        && let (Some(key), Some(value)) = (pair[0].first(), pair[1].last())
-                    {
-                        ranges.push(Span {
-                            start: key.span().start.saturating_sub(1),
-                            end: value.span().end,
-                        });
-                    }
-                }
-            }
-        }
-        for argument in node.args() {
-            collect_carrier_ranges(argument, source, ranges);
-        }
-    }
-}
-
-fn normalized_source_hash(source: &[u8], span: Span, ranges: &[Span]) -> String {
-    let bytes: Vec<_> = source[span.start..span.end]
-        .iter()
-        .enumerate()
-        .filter_map(|(offset, byte)| {
-            let absolute = span.start + offset;
-            (!ranges
-                .iter()
-                .any(|range| range.start <= absolute && absolute < range.end))
-            .then_some(*byte)
-        })
-        .collect();
-    source_hash(&bytes)
-}
-
 fn with_id(node: &Node, source: &[u8]) -> Option<BlockId> {
-    if node.name(source) != Some(b"with") || node.args().len() < 3 {
+    if node.name() != Some(b"with") || node.args().len() < 3 {
         return None;
     }
     node.args()[..node.args().len() - 1]
@@ -452,10 +453,10 @@ fn collect_links(
     refs: &mut Vec<(String, Span)>,
 ) {
     for node in nodes {
-        if node_kind(node.name(source)).is_some() {
+        if node_kind(node.name()).is_some() {
             continue;
         }
-        match node.name(source) {
+        match node.name() {
             Some(b"label") if label.is_none() => {
                 *label = node
                     .args()
@@ -491,10 +492,10 @@ fn collect_links(
 
 fn collect_labels(nodes: &[Node], source: &[u8], labels: &mut Vec<String>) {
     for node in nodes {
-        if node_kind(node.name(source)).is_some() {
+        if node_kind(node.name()).is_some() {
             continue;
         }
-        if node.name(source) == Some(b"label")
+        if node.name() == Some(b"label")
             && let Some(value) = node
                 .args()
                 .first()
@@ -652,6 +653,28 @@ mod tests {
                 b"Second."
             );
         }
+    }
+
+    #[test]
+    fn a_line_join_inside_a_block_tag_name_names_the_block() {
+        let source = b"<\\body><\\the\\\n   orem>x</theorem></body>";
+        let analysis = analyze(&parse(source).unwrap());
+        assert_eq!(analysis.blocks.len(), 1);
+        assert_eq!(analysis.blocks[0].kind, BlockKind::Theorem);
+    }
+
+    #[test]
+    fn block_without_canonical_text_is_reported_and_has_none() {
+        let source = "<\\body><\\theorem>x<with|mls-id|0f8fad5b-d9cb-469f-a165-70867728950e|></theorem></body>";
+        let analysis = analyze(&parse(source.as_bytes()).unwrap());
+        let block = &analysis.blocks[0];
+        assert_eq!(analysis.canonical_text(block.id), None);
+        assert!(
+            analysis
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "canonicalization_failed")
+        );
     }
 
     #[test]

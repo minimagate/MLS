@@ -71,7 +71,9 @@ pub struct Block {
     pub id: BlockId,
     /// Deterministically classified source kind.
     pub kind: BlockKind,
-    /// SHA-256 of source bytes with identity metadata normalized away.
+    /// SHA-256 of the block's layout-independent canonical text: the content as TeXmacs reads
+    /// it, with indentation, line breaks, short or long form and `mls-id` carriers normalized
+    /// away. Layout-only saves keep it stable. Model prompts use the same canonical text.
     pub text_hash: String,
     /// Primary source label, when present.
     pub label: Option<String>,
