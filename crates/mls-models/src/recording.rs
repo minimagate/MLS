@@ -1,7 +1,11 @@
-use crate::openrouter::{validate_answers, validate_model};
+use crate::openrouter::{
+    bound_embedding_error, embedding_hash, validate_answers, validate_embedding_request,
+    validate_embedding_usage, validate_embeddings, validate_model,
+};
 use crate::{
-    DecisionReply, DecisionRequest, GenerationReply, GenerationRequest, GenerationStage,
-    ModelClient, ModelError, ProviderFailure, Usage,
+    DecisionReply, DecisionRequest, EmbeddingClient, EmbeddingReply, EmbeddingRequest,
+    GenerationReply, GenerationRequest, GenerationStage, ModelClient, ModelError, ProviderFailure,
+    Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,7 +26,7 @@ pub const RECORDING_VERSION: u32 = 1;
 pub struct RecordedCall {
     /// Recording format version.
     pub version: u32,
-    /// API surface: `generation` or `decision`.
+    /// API surface: `generation`, `decision`, or `embedding`.
     pub endpoint_kind: String,
     /// Stable source block identifier.
     pub block_id: String,
@@ -312,6 +316,36 @@ impl<C: ModelClient> ModelClient for RecordingClient<C> {
     }
 }
 
+impl<C: EmbeddingClient> EmbeddingClient for RecordingClient<C> {
+    fn embed(&mut self, request: &EmbeddingRequest) -> Result<EmbeddingReply, ModelError> {
+        if self.recording_stopped() {
+            return Err(ModelError::RecordingStopped);
+        }
+        let canonical = embedding_request(request);
+        let started = Instant::now();
+        let result = self.inner.embed(request);
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let metadata = result.as_ref().ok().map(|reply| &reply.metadata);
+        let call = recorded(RecordedAttempt {
+            endpoint_kind: "embedding",
+            block_id: &request.context.block_id,
+            attempt: request.context.attempt,
+            request: canonical,
+            configured_model: &request.model,
+            resolved_model: metadata.map(|value| value.resolved_model.as_str()),
+            usage: metadata.map(|value| &value.usage),
+            provider_response: metadata.map(|value| &value.provider_response),
+            response_status: metadata.map(|value| value.http_status),
+            elapsed_ms,
+            result: &result,
+            provenance: &self.provenance,
+        });
+        let persisted = self.persist(&call);
+        self.note_persist_result(persisted);
+        result
+    }
+}
+
 struct RecordedAttempt<'a, T> {
     endpoint_kind: &'a str,
     block_id: &'a str,
@@ -548,7 +582,81 @@ impl ModelClient for ReplayClient {
     }
 }
 
+impl EmbeddingClient for ReplayClient {
+    fn embed(&mut self, request: &EmbeddingRequest) -> Result<EmbeddingReply, ModelError> {
+        let call = self.take("embedding", embedding_request(request))?;
+        let envelope = (
+            call.resolved_model.clone(),
+            call.usage.clone(),
+            call.response_status,
+            call.provider_response.clone(),
+        );
+        let reply: EmbeddingReply = replay(call).map_err(bound_embedding_error)?;
+        validate_embedding_request(request)?;
+        let fail = |message: String| {
+            bound_embedding_error(ModelError::Provider {
+                message,
+                failure: Box::new(ProviderFailure {
+                    status: reply.metadata.http_status,
+                    response: reply.metadata.provider_response.clone(),
+                    resolved_model: Some(reply.metadata.resolved_model.clone()),
+                    usage: Some(reply.metadata.usage.clone()),
+                }),
+            })
+        };
+        validate_model(&request.model, &reply.metadata.resolved_model).map_err(fail)?;
+        if reply.metadata.configured_model != request.model
+            || !(200..300).contains(&reply.metadata.http_status)
+            || envelope
+                != (
+                    Some(reply.metadata.resolved_model.clone()),
+                    Some(reply.metadata.usage.clone()),
+                    Some(reply.metadata.http_status),
+                    Some(reply.metadata.provider_response.clone()),
+                )
+        {
+            return Err(fail(
+                "embedding recording envelope metadata mismatch".into(),
+            ));
+        }
+        validate_embeddings(request, &reply.embeddings).map_err(fail)?;
+        validate_embedding_usage(&reply.metadata.usage).map_err(fail)?;
+        let summary = &reply.metadata.provider_response;
+        if summary["embedding_count"] != json!(reply.embeddings.len())
+            || summary["embedding_dimensions"] != json!(request.dimensions)
+            || summary["embedding_sha256"].as_str()
+                != Some(embedding_hash(&reply.embeddings).as_str())
+        {
+            return Err(fail(
+                "embedding recording vector audit summary mismatch".into(),
+            ));
+        }
+        Ok(reply)
+    }
+}
+
 fn replay<T: for<'de> Deserialize<'de>>(call: RecordedCall) -> Result<T, ModelError> {
+    if let Some(error) = &call.error {
+        let consistent = match error {
+            RecordedError::Provider { failure, .. } => {
+                call.resolved_model == failure.resolved_model
+                    && call.usage == failure.usage
+                    && call.response_status == Some(failure.status)
+                    && call.provider_response.as_ref() == Some(&failure.response)
+            }
+            _ => {
+                call.resolved_model.is_none()
+                    && call.usage.is_none()
+                    && call.response_status.is_none()
+                    && call.provider_response.is_none()
+            }
+        };
+        if !consistent {
+            return Err(ModelError::InvalidResponse(
+                "recording error envelope metadata mismatch".into(),
+            ));
+        }
+    }
     match (call.response, call.error) {
         (Some(response), None) => serde_json::from_value(response).map_err(ModelError::Json),
         (None, Some(error)) => Err(error.replay()),
@@ -580,6 +688,18 @@ fn decision_request(request: &DecisionRequest, model: &str) -> Value {
         "context": request.context,
         "state": request.state,
         "questions": request.questions
+    })
+}
+
+fn embedding_request(request: &EmbeddingRequest) -> Value {
+    json!({
+        "endpoint": "/api/v1/embeddings",
+        "context": request.context,
+        "model": request.model,
+        "input": request.input,
+        "dimensions": request.dimensions,
+        "input_type": request.input_type,
+        "encoding_format": "float"
     })
 }
 

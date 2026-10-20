@@ -10,12 +10,34 @@ pub struct ModelConfig {
     pub generation_model: String,
     /// Exact pinned OpenRouter decisions model request ID.
     pub decision_model: String,
+    /// Retrieval model and vector shape; defaults keep older model configs readable.
+    #[serde(default)]
+    pub retrieval: RetrievalConfig,
     /// Provider origin, configurable for local transport tests.
     pub base_url: String,
     /// Per-request wall-clock timeout.
     pub request_timeout_seconds: u64,
     /// Default bounded completion token limit.
     pub default_max_tokens: u32,
+}
+
+/// Embedding settings used to build and query one compatible retrieval index.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetrievalConfig {
+    /// Exact OpenRouter embedding model request ID.
+    pub embedding_model: String,
+    /// Expected number of coordinates in every embedding.
+    pub embedding_dimensions: usize,
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        Self {
+            embedding_model: "baai/bge-m3".into(),
+            embedding_dimensions: 1024,
+        }
+    }
 }
 
 impl ModelConfig {
@@ -115,6 +137,32 @@ pub struct DecisionRequest {
     pub state: Value,
     /// Questions keyed by caller-owned stable IDs.
     pub questions: BTreeMap<String, Question>,
+}
+
+/// Whether text represents a retrieval query or a document in the index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingInputType {
+    /// Embed a search query.
+    SearchQuery,
+    /// Embed a searchable document.
+    SearchDocument,
+}
+
+/// One ordered batch of texts to embed, including the complete replay identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingRequest {
+    /// Audit and replay identity.
+    pub context: CallContext,
+    /// Configured embedding model, also part of the index identity.
+    pub model: String,
+    /// Ordered, nonempty batch of nonempty texts.
+    pub input: Vec<String>,
+    /// Required number of coordinates per returned vector.
+    pub dimensions: usize,
+    /// Retrieval purpose; query and document calls are never interchangeable in replay.
+    pub input_type: EmbeddingInputType,
 }
 
 /// Normalized token and cost accounting.
@@ -219,6 +267,18 @@ pub struct DecisionReply {
     pub metadata: CallMetadata,
 }
 
+/// Validated vectors in the same order as the request inputs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingReply {
+    /// One finite vector of the requested dimensions for each input text.
+    pub embeddings: Vec<Vec<f64>>,
+    /// Provider identity, accounting, and compact evidence. `provider_response` includes
+    /// `embedding_count`, `embedding_dimensions`, and `embedding_sha256` (SHA-256 of the
+    /// ordered vectors serialized as compact JSON), which replay verifies against the vectors.
+    pub metadata: CallMetadata,
+}
+
 /// Conservative Boolean interpretation of a Noul probability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NoulAssessment {
@@ -297,6 +357,12 @@ pub trait ModelClient {
     fn generate(&mut self, request: &GenerationRequest) -> Result<GenerationReply, ModelError>;
     /// Obtain and validate typed Jev decisions.
     fn decide(&mut self, request: &DecisionRequest) -> Result<DecisionReply, ModelError>;
+}
+
+/// Provider-independent embedding boundary, separate from generation and decisions.
+pub trait EmbeddingClient {
+    /// Embed an ordered batch and validate its model, shape, and finite coordinates.
+    fn embed(&mut self, request: &EmbeddingRequest) -> Result<EmbeddingReply, ModelError>;
 }
 
 /// A sanitized model or replay failure.

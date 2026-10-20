@@ -2,9 +2,10 @@
 
 use mls_models::{
     Answer, CallContext, CallMetadata, ChatMessage, ChoiceAnswer, ChoiceAssessment, DecisionReply,
-    DecisionRequest, GenerationReply, GenerationRequest, GenerationStage, ModelClient, ModelConfig,
-    ModelError, NoulAnswer, NoulAssessment, OpenRouterClient, ProviderFailure, Question,
-    RecordedCall, RecordingClient, ReplayClient, Usage,
+    DecisionRequest, EmbeddingClient, EmbeddingInputType, EmbeddingReply, EmbeddingRequest,
+    GenerationReply, GenerationRequest, GenerationStage, ModelClient, ModelConfig, ModelError,
+    NoulAnswer, NoulAssessment, OpenRouterClient, ProviderFailure, Question, RecordedCall,
+    RecordingClient, ReplayClient, RetrievalConfig, Usage,
 };
 use serde_json::{Value, json};
 use std::{cell::Cell, collections::BTreeMap, path::PathBuf, rc::Rc, sync::mpsc, thread};
@@ -12,6 +13,700 @@ use tiny_http::{Header, Response, Server, StatusCode};
 
 const GENERATION_MODEL: &str = "anthropic/claude-sonnet-5";
 const DECISION_MODEL: &str = "typesafe/jev-1.14";
+const EMBEDDING_MODEL: &str = "baai/bge-m3";
+
+fn embedding_request() -> EmbeddingRequest {
+    EmbeddingRequest {
+        context: CallContext {
+            block_id: "retrieval-batch-1".into(),
+            attempt: 0,
+        },
+        model: EMBEDDING_MODEL.into(),
+        input: vec![
+            "A continuous function on a compact space.".into(),
+            "A convergent real sequence.".into(),
+        ],
+        dimensions: 3,
+        input_type: EmbeddingInputType::SearchDocument,
+    }
+}
+
+fn embedding_config(base_url: String) -> ModelConfig {
+    let mut config = config(base_url);
+    config.retrieval.embedding_dimensions = 3;
+    config
+}
+
+fn embedding_response() -> Value {
+    json!({
+        "id": "emb-1", "model": EMBEDDING_MODEL, "object": "list",
+        "data": [
+            {"index": 1, "object": "embedding", "embedding": [0.0, 1.0, -1.0]},
+            {"index": 0, "object": "embedding", "embedding": [1.0, 0.0, 2.0]}
+        ],
+        "usage": {"prompt_tokens": 8, "total_tokens": 8}
+    })
+}
+
+fn serve_json(status: u16, body: Value) -> (String, mpsc::Receiver<(String, Vec<Header>, Value)>) {
+    serve_once(status, Box::leak(body.to_string().into_boxed_str()))
+}
+
+#[test]
+fn retrieval_configuration_defaults_without_changing_existing_models() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/models.json");
+    let checked_in = ModelConfig::from_path(path).unwrap();
+    assert_eq!(checked_in.generation_model, GENERATION_MODEL);
+    assert_eq!(checked_in.decision_model, DECISION_MODEL);
+    assert_eq!(checked_in.retrieval, RetrievalConfig::default());
+    assert_eq!(checked_in.retrieval.embedding_model, EMBEDDING_MODEL);
+    assert_eq!(checked_in.retrieval.embedding_dimensions, 1024);
+    let mut legacy = serde_json::to_value(&checked_in).unwrap();
+    legacy.as_object_mut().unwrap().remove("retrieval");
+    assert_eq!(
+        serde_json::from_value::<ModelConfig>(legacy).unwrap(),
+        checked_in
+    );
+}
+
+#[test]
+fn embeddings_send_typed_batches_and_restore_input_order_without_inventing_usage() {
+    let (base_url, captured) = serve_json(200, embedding_response());
+    let mut client =
+        OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+    let request = embedding_request();
+    let reply = client.embed(&request).unwrap();
+    assert_eq!(
+        reply.embeddings,
+        [vec![1.0, 0.0, 2.0], vec![0.0, 1.0, -1.0]]
+    );
+    assert_eq!(
+        reply.metadata.usage,
+        Usage {
+            input_tokens: Some(8),
+            total_tokens: Some(8),
+            ..Usage::default()
+        }
+    );
+    let (path, headers, body) = captured.recv().unwrap();
+    assert_eq!(path, "/api/v1/embeddings");
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.field.equiv("authorization"))
+    );
+    assert_eq!(body["model"], EMBEDDING_MODEL);
+    assert_eq!(body["input"], json!(request.input));
+    assert_eq!(body["dimensions"], 3);
+    assert_eq!(body["encoding_format"], "float");
+    assert_eq!(body["input_type"], "search_document");
+    assert!(body.get("context").is_none());
+    assert!(body.get("messages").is_none());
+
+    let mut response = embedding_response();
+    response.as_object_mut().unwrap().remove("usage");
+    let (base_url, _) = serve_json(200, response);
+    let mut client =
+        OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+    assert_eq!(
+        client.embed(&request).unwrap().metadata.usage,
+        Usage::default()
+    );
+}
+
+#[test]
+fn embedding_query_purpose_and_reported_zero_cost_are_preserved() {
+    let mut response = embedding_response();
+    response["usage"]["cost"] = json!(0.0);
+    let (base_url, captured) = serve_json(200, response);
+    let mut client =
+        OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+    let mut request = embedding_request();
+    request.input_type = EmbeddingInputType::SearchQuery;
+    assert_eq!(
+        client.embed(&request).unwrap().metadata.usage.cost,
+        Some(0.0)
+    );
+    assert_eq!(captured.recv().unwrap().2["input_type"], "search_query");
+}
+
+#[test]
+fn rejected_embedding_costs_are_unknown_while_valid_tokens_still_aggregate() {
+    let mut usages = Vec::new();
+    for invalid_cost in [json!(-0.25), json!("NaN"), json!("Infinity")] {
+        let mut body = embedding_response();
+        body["usage"] = json!({"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10, "cost": invalid_cost});
+        let (base_url, _) = serve_json(200, body);
+        let mut client =
+            OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+        let ModelError::Provider { failure, .. } = client.embed(&embedding_request()).unwrap_err()
+        else {
+            panic!("provider failure expected")
+        };
+        let usage = failure.usage.unwrap();
+        assert_eq!(
+            usage.cost, None,
+            "invalid reported cost must not become known spending"
+        );
+        assert_eq!(usage.total_tokens, Some(10));
+        usages.push(usage);
+    }
+    assert_eq!(
+        usages
+            .iter()
+            .filter_map(|usage| usage.input_tokens)
+            .sum::<u64>(),
+        24
+    );
+    assert_eq!(
+        usages
+            .iter()
+            .filter_map(|usage| usage.output_tokens)
+            .sum::<u64>(),
+        6
+    );
+    assert_eq!(
+        usages.iter().filter_map(|usage| usage.cost).sum::<f64>(),
+        0.0
+    );
+    assert_eq!(
+        usages.iter().filter(|usage| usage.cost.is_none()).count(),
+        3
+    );
+}
+
+#[test]
+fn embedding_success_recordings_store_vectors_once_with_stable_audit_hashes() {
+    let directory =
+        std::env::temp_dir().join(format!("mls-embeddings-compact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let mut hashes = Vec::new();
+    for index in 0..2 {
+        let mut body = embedding_response();
+        if index == 1 {
+            body["data"].as_array_mut().unwrap().reverse();
+        }
+        let (base_url, _) = serve_once_with_headers(
+            200,
+            Box::leak(body.to_string().into_boxed_str()),
+            vec![
+                Header::from_bytes("X-RateLimit-Remaining", "99").unwrap(),
+                Header::from_bytes("Authorization", "sensitive-other-header").unwrap(),
+            ],
+        );
+        let live = OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+        let mut recorder = RecordingClient::new(
+            live,
+            &directory,
+            GENERATION_MODEL,
+            DECISION_MODEL,
+            "synthetic",
+        );
+        let reply = recorder.embed(&embedding_request()).unwrap();
+        let summary = &reply.metadata.provider_response;
+        assert!(summary.get("data").is_none());
+        assert!(summary.get("embeddings").is_none());
+        assert_eq!(summary["id"], "emb-1");
+        assert_eq!(summary["model"], EMBEDDING_MODEL);
+        assert_eq!(summary["object"], "list");
+        assert_eq!(summary["usage"]["prompt_tokens"], 8);
+        assert_eq!(summary["embedding_count"], 2);
+        assert_eq!(summary["embedding_dimensions"], 3);
+        assert_eq!(summary["response_headers"]["x-ratelimit-remaining"], "99");
+        hashes.push(summary["embedding_sha256"].as_str().unwrap().to_owned());
+        assert_eq!(hashes[index].len(), 64);
+        let text =
+            std::fs::read_to_string(directory.join(format!("call-{index:04}.json"))).unwrap();
+        assert!(!text.contains("sensitive-other-header"));
+        let call: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(call["provider_response"], *summary);
+        assert_eq!(call["response"]["metadata"]["provider_response"], *summary);
+        assert_eq!(call["response"]["embeddings"], json!(reply.embeddings));
+    }
+    assert_eq!(
+        hashes[0], hashes[1],
+        "wire row order must not change the vector hash"
+    );
+    let mut replay =
+        ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
+    assert_eq!(
+        replay.embed(&embedding_request()).unwrap().embeddings,
+        embedding_reply().embeddings
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn embedding_failures_keep_retry_headers_and_bound_large_evidence() {
+    for large in [false, true] {
+        let mut body = json!({"model": EMBEDDING_MODEL, "data": [], "usage": {"prompt_tokens": 8, "cost": 0.25}});
+        if large {
+            body["padding"] = json!("x".repeat(20_000));
+        }
+        let (base_url, _) = serve_once_with_headers(
+            429,
+            Box::leak(body.to_string().into_boxed_str()),
+            vec![
+                Header::from_bytes("Retry-After", "120").unwrap(),
+                Header::from_bytes("X-RateLimit-Reset", "1900000000").unwrap(),
+                Header::from_bytes("RateLimit-Limit", "500").unwrap(),
+            ],
+        );
+        let mut client =
+            OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+        let ModelError::Provider { failure, .. } = client.embed(&embedding_request()).unwrap_err()
+        else {
+            panic!("provider failure expected")
+        };
+        assert_eq!(failure.usage.unwrap().cost, Some(0.25));
+        let headers = &failure.response["_mls_response_headers"];
+        assert_eq!(headers["retry-after"], "120");
+        assert_eq!(headers["x-ratelimit-reset"], "1900000000");
+        assert_eq!(headers["ratelimit-limit"], "500");
+        assert!(failure.response.to_string().len() < 4096);
+        assert_eq!(failure.response.get("truncated").is_some(), large);
+    }
+}
+
+#[test]
+fn remote_embeddings_require_explicit_environment_opt_in() {
+    if std::env::var("MLS_LIVE").as_deref() == Ok("1") {
+        return;
+    }
+    let mut client = OpenRouterClient::new(
+        embedding_config("https://openrouter.ai".into()),
+        "local-test-secret",
+    )
+    .unwrap();
+    assert!(
+        matches!(client.embed(&embedding_request()), Err(ModelError::InvalidResponse(message)) if message == "remote embeddings require MLS_LIVE=1")
+    );
+}
+
+#[test]
+fn embeddings_reject_redirects_without_contacting_a_second_origin() {
+    let destination = Server::http("127.0.0.1:0").expect("bind redirect destination");
+    let location = format!("http://{}/redirected", destination.server_addr());
+    let (sent, received) = mpsc::channel();
+    thread::spawn(move || {
+        let request = destination
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let contacted = request.is_some();
+        if let Some(request) = request {
+            request
+                .respond(Response::from_string(embedding_response().to_string()))
+                .unwrap();
+        }
+        sent.send(contacted).unwrap();
+    });
+    let (base_url, captured) = serve_once_with_headers(
+        307,
+        "{}",
+        vec![Header::from_bytes("Location", location.as_bytes()).unwrap()],
+    );
+    let mut client =
+        OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+    let result = client.embed(&embedding_request());
+    let contacted = received.recv().unwrap();
+    assert!(
+        !contacted,
+        "embedding redirects must not send the batch to a second origin"
+    );
+    assert!(matches!(result, Err(ModelError::Provider { failure, .. }) if failure.status == 307));
+    assert_eq!(captured.recv().unwrap().0, "/api/v1/embeddings");
+}
+
+#[test]
+fn generation_keeps_its_existing_redirect_behavior() {
+    let (destination, captured_destination) = serve_once(
+        200,
+        r#"{"model":"anthropic/claude-sonnet-5","choices":[{"message":{"content":"{\"answer\":\"ok\"}"},"finish_reason":"stop"}]}"#,
+    );
+    let (origin, captured_origin) = serve_once_with_headers(
+        307,
+        "{}",
+        vec![
+            Header::from_bytes("Location", format!("{destination}/redirected").as_bytes()).unwrap(),
+        ],
+    );
+    let mut client = OpenRouterClient::new(config(origin), "local-test-secret").unwrap();
+    assert_eq!(
+        client.generate(&generation_request()).unwrap().output,
+        json!({"answer": "ok"})
+    );
+    assert_eq!(
+        captured_origin.recv().unwrap().0,
+        "/api/v1/chat/completions"
+    );
+    assert_eq!(captured_destination.recv().unwrap().0, "/redirected");
+}
+
+#[test]
+fn invalid_embedding_inputs_are_rejected_before_transport() {
+    let mut client = OpenRouterClient::new(
+        embedding_config("http://127.0.0.1:1".into()),
+        "local-test-secret",
+    )
+    .unwrap();
+    for mutation in ["empty", "blank", "model", "dimensions", "configuration"] {
+        let mut request = embedding_request();
+        match mutation {
+            "empty" => request.input.clear(),
+            "blank" => request.input[0] = " ".into(),
+            "model" => request.model.clear(),
+            "dimensions" => request.dimensions = 0,
+            "configuration" => request.model = "openai/text-embedding-3-small".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(client.embed(&request), Err(ModelError::InvalidResponse(_))),
+            "{mutation}"
+        );
+    }
+}
+
+#[test]
+fn invalid_embedding_rows_models_and_cost_retain_known_failure_usage() {
+    for mutation in [
+        "missing",
+        "extra",
+        "duplicate",
+        "range",
+        "negative",
+        "dimension",
+        "base64",
+        "coordinate",
+        "model",
+        "absent-model",
+        "negative-cost",
+    ] {
+        let mut body = embedding_response();
+        body["usage"]["cost"] = json!(0.25);
+        match mutation {
+            "missing" => {
+                body["data"].as_array_mut().unwrap().pop();
+            }
+            "extra" => {
+                let row = body["data"][0].clone();
+                body["data"].as_array_mut().unwrap().push(row);
+            }
+            "duplicate" => body["data"][0]["index"] = json!(0),
+            "range" => body["data"][0]["index"] = json!(2),
+            "negative" => body["data"][0]["index"] = json!(-1),
+            "dimension" => body["data"][0]["embedding"] = json!([1.0, 0.0]),
+            "base64" => body["data"][0]["embedding"] = json!("AAAA"),
+            "coordinate" => body["data"][0]["embedding"][0] = json!("NaN"),
+            "model" => body["model"] = json!("baai/bge-m30"),
+            "absent-model" => {
+                body.as_object_mut().unwrap().remove("model");
+            }
+            "negative-cost" => body["usage"]["cost"] = json!(-0.25),
+            _ => unreachable!(),
+        }
+        let (base_url, _) = serve_json(200, body);
+        let mut client =
+            OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+        let ModelError::Provider { failure, .. } = client.embed(&embedding_request()).unwrap_err()
+        else {
+            panic!("{mutation}: provider failure expected")
+        };
+        assert_eq!(failure.status, 200);
+        assert_eq!(
+            failure.usage.as_ref().unwrap().input_tokens,
+            Some(8),
+            "{mutation}"
+        );
+        if mutation != "negative-cost" {
+            assert_eq!(failure.usage.unwrap().cost, Some(0.25), "{mutation}");
+        }
+    }
+    for coordinate in ["NaN", "Infinity", "1e400"] {
+        let body = embedding_response().to_string().replacen(
+            "[0.0,1.0,-1.0]",
+            &format!("[{coordinate},1.0,-1.0]"),
+            1,
+        );
+        let (base_url, _) = serve_once(200, Box::leak(body.into_boxed_str()));
+        let mut client =
+            OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+        assert!(client.embed(&embedding_request()).is_err(), "{coordinate}");
+    }
+}
+
+struct EmbeddingFake {
+    result: Option<Result<EmbeddingReply, ModelError>>,
+    calls: Rc<Cell<usize>>,
+}
+
+impl EmbeddingClient for EmbeddingFake {
+    fn embed(&mut self, _: &EmbeddingRequest) -> Result<EmbeddingReply, ModelError> {
+        self.calls.set(self.calls.get() + 1);
+        self.result.take().expect("one scripted embedding call")
+    }
+}
+
+fn embedding_reply() -> EmbeddingReply {
+    let mut metadata = generation_reply().metadata;
+    metadata.configured_model = EMBEDDING_MODEL.into();
+    metadata.resolved_model = EMBEDDING_MODEL.into();
+    metadata.provider_response = json!({
+        "synthetic": true,
+        "embedding_count": 2,
+        "embedding_dimensions": 3,
+        "embedding_sha256": "e382e02d6ca6f00ecc16e6cc441e61c8894660c5daea2ead7274c3c9f5efdc3e",
+    });
+    EmbeddingReply {
+        embeddings: vec![vec![1.0, 0.0, 2.0], vec![0.0, 1.0, -1.0]],
+        metadata,
+    }
+}
+
+fn embedding_record(name: &str) -> RecordedCall {
+    let directory =
+        std::env::temp_dir().join(format!("mls-embeddings-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let mut recorder = RecordingClient::new(
+        EmbeddingFake {
+            result: Some(Ok(embedding_reply())),
+            calls: Rc::new(Cell::new(0)),
+        },
+        &directory,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert_eq!(
+        recorder.embed(&embedding_request()).unwrap(),
+        embedding_reply()
+    );
+    let record =
+        serde_json::from_slice(&std::fs::read(directory.join("call-0000.json")).unwrap()).unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    record
+}
+
+#[test]
+fn embedding_record_replay_requires_every_canonical_request_field() {
+    let call = embedding_record("exact");
+    assert_eq!(call.endpoint_kind, "embedding");
+    assert_eq!(call.request["endpoint"], "/api/v1/embeddings");
+    assert_eq!(call.request["encoding_format"], "float");
+    assert_eq!(call.request["input_type"], "search_document");
+    let mut replay =
+        ReplayClient::new(vec![call.clone()], GENERATION_MODEL, DECISION_MODEL).unwrap();
+    assert_eq!(
+        replay.embed(&embedding_request()).unwrap(),
+        embedding_reply()
+    );
+    for mutation in [
+        "block",
+        "attempt",
+        "model",
+        "input",
+        "order",
+        "dimensions",
+        "purpose",
+    ] {
+        let mut request = embedding_request();
+        match mutation {
+            "block" => request.context.block_id.push('2'),
+            "attempt" => request.context.attempt += 1,
+            "model" => request.model.push('2'),
+            "input" => request.input[0].push('!'),
+            "order" => request.input.reverse(),
+            "dimensions" => request.dimensions += 1,
+            "purpose" => request.input_type = EmbeddingInputType::SearchQuery,
+            _ => unreachable!(),
+        }
+        let mut replay =
+            ReplayClient::new(vec![call.clone()], GENERATION_MODEL, DECISION_MODEL).unwrap();
+        assert!(
+            matches!(replay.embed(&request), Err(ModelError::ReplayMismatch)),
+            "{mutation}"
+        );
+        assert_eq!(
+            replay.embed(&embedding_request()).unwrap(),
+            embedding_reply(),
+            "a mismatch must not consume the recording"
+        );
+    }
+}
+
+#[test]
+fn embedding_replay_revalidates_vector_shape_model_and_accounting_envelope() {
+    let call = embedding_record("validation");
+    for mutation in [
+        "rows",
+        "dimension",
+        "coordinate",
+        "finite-coordinate",
+        "summary-count",
+        "summary-dimensions",
+        "summary-hash",
+        "missing-hash",
+        "model",
+        "configured",
+        "status",
+        "usage",
+        "response",
+    ] {
+        let mut corrupt = call.clone();
+        let response = corrupt.response.as_mut().unwrap();
+        match mutation {
+            "rows" => response["embeddings"] = json!([]),
+            "dimension" => response["embeddings"][0] = json!([1.0]),
+            "coordinate" => response["embeddings"][0][0] = json!(null),
+            "finite-coordinate" => response["embeddings"][0][0] = json!(0.5),
+            "summary-count" | "summary-dimensions" | "summary-hash" | "missing-hash" => {
+                let summary = &mut response["metadata"]["provider_response"];
+                match mutation {
+                    "summary-count" => summary["embedding_count"] = json!(3),
+                    "summary-dimensions" => summary["embedding_dimensions"] = json!(4),
+                    "summary-hash" => summary["embedding_sha256"] = json!("0".repeat(64)),
+                    "missing-hash" => {
+                        summary.as_object_mut().unwrap().remove("embedding_sha256");
+                    }
+                    _ => unreachable!(),
+                }
+                corrupt.provider_response = Some(summary.clone());
+            }
+            "model" => response["metadata"]["resolved_model"] = json!("unrelated/model"),
+            "configured" => response["metadata"]["configured_model"] = json!("unrelated/model"),
+            "status" => response["metadata"]["http_status"] = json!(429),
+            "usage" => corrupt.usage.as_mut().unwrap().cost = Some(99.0),
+            "response" => corrupt.provider_response = Some(json!({"different": true})),
+            _ => unreachable!(),
+        }
+        let mut replay =
+            ReplayClient::new(vec![corrupt], GENERATION_MODEL, DECISION_MODEL).unwrap();
+        assert!(replay.embed(&embedding_request()).is_err(), "{mutation}");
+    }
+}
+
+#[test]
+fn rejected_successful_embedding_replay_normalizes_cost_and_preserves_evidence() {
+    let original = embedding_record("invalid-replayed-cost");
+    for rejection in ["cost", "model", "shape"] {
+        let mut call = original.clone();
+        call.usage.as_mut().unwrap().cost = Some(-0.25);
+        let response = call.response.as_mut().unwrap();
+        response["metadata"]["usage"]["cost"] = json!(-0.25);
+        match rejection {
+            "model" => {
+                response["metadata"]["resolved_model"] = json!("unrelated/model");
+                call.resolved_model = Some("unrelated/model".into());
+            }
+            "shape" => response["embeddings"][0] = json!([]),
+            "cost" => {}
+            _ => unreachable!(),
+        }
+        let evidence = call.provider_response.clone().unwrap();
+        let mut expected_usage = call.usage.clone().unwrap();
+        expected_usage.cost = None;
+        let mut replay = ReplayClient::new(vec![call], GENERATION_MODEL, DECISION_MODEL).unwrap();
+        let ModelError::Provider { failure, .. } = replay.embed(&embedding_request()).unwrap_err()
+        else {
+            panic!("{rejection}: provider failure expected")
+        };
+        assert_eq!(failure.usage, Some(expected_usage), "{rejection}");
+        assert_eq!(failure.response, evidence, "{rejection}");
+    }
+}
+
+#[test]
+fn embedding_provider_failures_record_replay_accounting_and_redact_credentials() {
+    for status in [200, 429] {
+        let directory = std::env::temp_dir().join(format!(
+            "mls-embeddings-error-{status}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let body = json!({"model": EMBEDDING_MODEL, "data": [], "secret": "local-test-secret", "debug": "local-test-secret", "local-test-secret": "reflected key", "usage": {"prompt_tokens": 8, "cost": 0.25}});
+        let (base_url, _) = serve_json(status, body);
+        let live = OpenRouterClient::new(embedding_config(base_url), "local-test-secret").unwrap();
+        let mut recorder = RecordingClient::new(
+            live,
+            &directory,
+            GENERATION_MODEL,
+            DECISION_MODEL,
+            "synthetic",
+        );
+        let error = recorder.embed(&embedding_request()).unwrap_err();
+        assert!(!format!("{error:?}{error}").contains("local-test-secret"));
+        let serialized = std::fs::read_to_string(directory.join("call-0000.json")).unwrap();
+        assert!(!serialized.contains("local-test-secret"));
+        let recorded: RecordedCall = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(recorded.usage.as_ref().unwrap().cost, Some(0.25));
+        assert_eq!(recorded.response_status, Some(status));
+        let mut replay =
+            ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
+        let ModelError::Provider { failure, .. } = replay.embed(&embedding_request()).unwrap_err()
+        else {
+            panic!("provider failure expected")
+        };
+        assert_eq!(failure.usage.unwrap().input_tokens, Some(8));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn embedding_recording_failure_returns_paid_result_and_stops_future_calls() {
+    let path = blocked_recording_path("mls-embeddings-blocked");
+    let calls = Rc::new(Cell::new(0));
+    let mut recorder = RecordingClient::new(
+        EmbeddingFake {
+            result: Some(Ok(embedding_reply())),
+            calls: Rc::clone(&calls),
+        },
+        &path,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert_eq!(
+        recorder.embed(&embedding_request()).unwrap(),
+        embedding_reply()
+    );
+    assert!(recorder.persistence_failure().is_some());
+    assert!(matches!(
+        recorder.embed(&embedding_request()),
+        Err(ModelError::RecordingStopped)
+    ));
+    assert_eq!(calls.get(), 1);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn embedding_transport_failure_records_and_replays_unknown_usage() {
+    let directory =
+        std::env::temp_dir().join(format!("mls-embeddings-transport-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let mut recorder = RecordingClient::new(
+        EmbeddingFake {
+            result: Some(Err(ModelError::Transport("connection reset".into()))),
+            calls: Rc::new(Cell::new(0)),
+        },
+        &directory,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    assert!(matches!(
+        recorder.embed(&embedding_request()),
+        Err(ModelError::Transport(_))
+    ));
+    let call: RecordedCall =
+        serde_json::from_slice(&std::fs::read(directory.join("call-0000.json")).unwrap()).unwrap();
+    assert_eq!(call.usage, None);
+    assert_eq!(call.response_status, None);
+    let mut replay =
+        ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
+    assert!(
+        matches!(replay.embed(&embedding_request()), Err(ModelError::Transport(message)) if message == "connection reset")
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
 
 fn schema() -> Value {
     json!({
@@ -75,6 +770,7 @@ fn config(base_url: String) -> ModelConfig {
     ModelConfig {
         generation_model: GENERATION_MODEL.into(),
         decision_model: DECISION_MODEL.into(),
+        retrieval: RetrievalConfig::default(),
         base_url,
         request_timeout_seconds: 5,
         default_max_tokens: 32,
@@ -84,6 +780,14 @@ fn config(base_url: String) -> ModelConfig {
 fn serve_once(
     status: u16,
     body: &'static str,
+) -> (String, mpsc::Receiver<(String, Vec<Header>, Value)>) {
+    serve_once_with_headers(status, body, Vec::new())
+}
+
+fn serve_once_with_headers(
+    status: u16,
+    body: &'static str,
+    response_headers: Vec<Header>,
 ) -> (String, mpsc::Receiver<(String, Vec<Header>, Value)>) {
     let server = Server::http("127.0.0.1:0").expect("bind local mock server");
     let address = format!("http://{}", server.server_addr());
@@ -97,9 +801,11 @@ fn serve_once(
             .expect("read request");
         let parsed = serde_json::from_slice(&bytes).expect("request JSON");
         let capture = (request.url().to_owned(), request.headers().to_vec(), parsed);
-        request
-            .respond(Response::from_string(body).with_status_code(StatusCode(status)))
-            .expect("respond");
+        let mut response = Response::from_string(body).with_status_code(StatusCode(status));
+        for header in response_headers {
+            response.add_header(header);
+        }
+        request.respond(response).expect("respond");
         let _ = sender.send(capture);
     });
     (address, receiver)
@@ -411,6 +1117,42 @@ fn provider_failure_recording_keeps_redacted_audit_data_and_replays_error() {
         replay.generate(&generation_request()),
         Err(ModelError::Provider { .. })
     ));
+    let call: RecordedCall = serde_json::from_str(&text).unwrap();
+    for mutation in [
+        "tokens",
+        "cost",
+        "status",
+        "model",
+        "response",
+        "error-cost",
+    ] {
+        let mut corrupted = call.clone();
+        match mutation {
+            "tokens" => corrupted.usage.as_mut().unwrap().input_tokens = Some(999),
+            "cost" => corrupted.usage.as_mut().unwrap().cost = Some(99.0),
+            "status" => corrupted.response_status = Some(503),
+            "model" => corrupted.resolved_model = Some("unrelated/model".into()),
+            "response" => corrupted.provider_response = Some(json!({"tampered": true})),
+            "error-cost" => {
+                let Some(mls_models::RecordedError::Provider { failure, .. }) =
+                    &mut corrupted.error
+                else {
+                    unreachable!()
+                };
+                failure.usage.as_mut().unwrap().cost = Some(99.0);
+            }
+            _ => unreachable!(),
+        }
+        let mut replay =
+            ReplayClient::new(vec![corrupted], GENERATION_MODEL, DECISION_MODEL).unwrap();
+        assert!(
+            matches!(
+                replay.generate(&generation_request()),
+                Err(ModelError::InvalidResponse(_))
+            ),
+            "{mutation}"
+        );
+    }
     std::fs::remove_dir_all(directory).unwrap();
 }
 
