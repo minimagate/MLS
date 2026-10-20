@@ -46,6 +46,16 @@ pub enum ReviewAction {
     },
 }
 
+/// Optional decision-layer hints for one complete source update. These are scheduling inputs;
+/// they cannot confirm a SIR, preserve a checked statement, or alter a structural check.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateHints {
+    /// Complete implicit-link overlay: source block to one earlier labeled target.
+    pub implicit_links: BTreeMap<BlockId, BlockId>,
+    /// Blocks whose edit was judged cosmetic. Unsafe or inapplicable hints are ignored.
+    pub cosmetic_edits: BTreeSet<BlockId>,
+}
+
 /// A review action that was refused. A refused action leaves the engine unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum ActionError {
@@ -197,7 +207,59 @@ impl Engine {
         active: Option<BlockId>,
         now: u64,
     ) -> Result<ChangeSet, DocumentError> {
-        let change = self.document.update(source)?;
+        self.on_change_with_hints(source, active, now, &UpdateHints::default())
+    }
+
+    /// Whether this block presently has no current, settled, reviewed or cached SIR and no
+    /// outstanding job. This is only a preliminary check: [`Self::on_change_with_hints`] also
+    /// requires a strictly text-only edit without upstream invalidation.
+    #[must_use]
+    pub fn cosmetic_hint_eligible(&self, id: BlockId) -> bool {
+        let Some(block) = self.document.block(id) else {
+            return false;
+        };
+        if !is_formal(block.kind)
+            || self.in_flight.contains_key(&id)
+            || self.review.entry(id).is_some()
+            || self
+                .reports
+                .get(&id)
+                .is_some_and(|report| report.sir.is_some())
+            || self
+                .settled
+                .get(&id)
+                .is_some_and(|settled| settled.sir.is_some())
+        {
+            return false;
+        }
+        let key = sir_cache_key(
+            &self.config.model,
+            &block.text_hash,
+            &applied_dependencies(&self.dependency_hashes(id)),
+        );
+        self.sir_cache.lookup(&key).is_none()
+    }
+
+    /// Apply strict implicit links and conservative cosmetic scheduling hints. Link errors refuse
+    /// the entire update; unsafe cosmetic hints fall back to normal invalidation. An accepted
+    /// cosmetic hint suppresses only that block's work and clears its local report/settlement;
+    /// the new text is always installed and downstream invalidation still runs normally.
+    pub fn on_change_with_hints(
+        &mut self,
+        source: &[u8],
+        active: Option<BlockId>,
+        now: u64,
+        hints: &UpdateHints,
+    ) -> Result<ChangeSet, DocumentError> {
+        let eligible: BTreeMap<_, _> = hints
+            .cosmetic_edits
+            .iter()
+            .filter(|id| self.cosmetic_hint_eligible(**id))
+            .filter_map(|id| self.document.block(*id).cloned().map(|state| (*id, state)))
+            .collect();
+        let change = self
+            .document
+            .update_with_links(source, &hints.implicit_links)?;
         for id in &change.removed {
             self.forget_block(*id);
         }
@@ -212,6 +274,29 @@ impl Engine {
         }
         for id in self.document.dirty(&change) {
             self.mark_dirty(id, now);
+        }
+        for (id, old) in eligible {
+            let Some(new) = self.document.block(id) else {
+                continue;
+            };
+            if old.kind == new.kind
+                && old.label == new.label
+                && old.deps == new.deps
+                && old.position == new.position
+                && old.section == new.section
+                && old.text_hash != new.text_hash
+                && change.changed.contains(&id)
+                && !change.previous_dependents.contains(&id)
+                && self.document.canonical(id).is_some()
+                && self.cosmetic_hint_eligible(id)
+                && self.upstream_ready(id)
+            {
+                self.dirty.remove(&id);
+                self.touched.remove(&id);
+                self.left_ready.remove(&id);
+                self.reports.remove(&id);
+                self.settled.remove(&id);
+            }
         }
         self.block_dependency_cycles();
         self.move_cursor(active);

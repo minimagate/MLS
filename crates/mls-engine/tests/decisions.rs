@@ -298,6 +298,57 @@ fn finished_gate_answers_yes_no_and_waits_when_unsure() {
     run_finished(&mut replay_layer("finished"));
 }
 
+#[test]
+fn finished_oracle_adapter_uses_answer_confidence_and_conservative_fallbacks() {
+    use mls_engine::live::{Finished as LiveFinished, FinishedOracle, FinishedQuery, OracleAnswer};
+    let mut layer = DecisionLayer::new(
+        Fixed {
+            replies: VecDeque::from([
+                answered(vec![("answer", yes_no(0.97))]),
+                answered(vec![("answer", yes_no(0.02))]),
+                answered(vec![("answer", yes_no(0.5))]),
+                Err(ModelError::Transport("offline".into())),
+                answered(vec![("answer", choice_without_evidence("yes"))]),
+            ]),
+        },
+        DecisionConfig::default(),
+    )
+    .unwrap();
+    let query = FinishedQuery {
+        block: BLOCK_ID.parse().unwrap(),
+        text: "A complete claim.",
+    };
+    let yes = FinishedOracle::is_finished(&mut layer, &query);
+    assert_eq!(yes.finished, LiveFinished::Yes);
+    assert!((yes.confidence - 0.97).abs() < 1e-12);
+    let no = FinishedOracle::is_finished(&mut layer, &query);
+    assert_eq!(no.finished, LiveFinished::No);
+    assert!(
+        (no.confidence - 0.98).abs() < 1e-12,
+        "confidence of No is 1-p"
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            FinishedOracle::is_finished(&mut layer, &query),
+            OracleAnswer::UNKNOWN
+        );
+    }
+    let long = "x".repeat(4_001);
+    assert_eq!(
+        FinishedOracle::is_finished(
+            &mut layer,
+            &FinishedQuery {
+                text: &long,
+                ..query
+            }
+        ),
+        OracleAnswer::UNKNOWN
+    );
+    assert_eq!(layer.usage().calls, 5);
+    assert_eq!(layer.usage().input_tokens, 480);
+    assert_eq!(layer.usage().unknown_cost_calls, 1);
+}
+
 fn run_semantic_edit<D: Decider>(layer: &mut DecisionLayer<D>) {
     let cosmetic = layer.is_semantic_edit(BLOCK_ID, "a ≤ b", "a ≤ b ");
     assert_eq!(cosmetic.value, EditKind::Cosmetic);

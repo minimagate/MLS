@@ -21,6 +21,16 @@ pub enum DocumentError {
     /// Formal blocks have no persisted identity yet.
     #[error("formal blocks lack persisted IDs; run mls --write-ids on the document first")]
     MissingIds,
+    /// A caller-supplied implicit link is not a unique link to an earlier labeled block.
+    #[error("invalid implicit link {block} -> {target}: {reason}")]
+    InvalidImplicitLink {
+        /// Block that would use the premise.
+        block: BlockId,
+        /// Earlier labeled target that would be referenced.
+        target: BlockId,
+        /// Violated input invariant.
+        reason: &'static str,
+    },
 }
 
 /// Derived state of one block in the latest analysis.
@@ -125,7 +135,19 @@ impl Document {
     ///
     /// Returns [`DocumentError`] when the source is refused.
     pub fn update(&mut self, source: &[u8]) -> Result<ChangeSet, DocumentError> {
-        let analysis = analyze(&parse(source)?);
+        self.update_with_links(source, &BTreeMap::new())
+    }
+
+    /// Update with a complete caller-supplied set of implicit links, one per source block.
+    /// Links append to explicit reference order, target an earlier labeled block, and may not
+    /// duplicate an explicit edge. Invalid links refuse the entire update. Combined explicit and
+    /// implicit cycles use the same cycle-blocked graph as ordinary references.
+    pub fn update_with_links(
+        &mut self,
+        source: &[u8],
+        links: &BTreeMap<BlockId, BlockId>,
+    ) -> Result<ChangeSet, DocumentError> {
+        let mut analysis = analyze(&parse(source)?);
         if analysis
             .diagnostics
             .iter()
@@ -135,6 +157,41 @@ impl Document {
         }
         if lacks_persisted_ids(&analysis) {
             return Err(DocumentError::MissingIds);
+        }
+        let positions: HashMap<_, _> = analysis
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(position, block)| (block.id, position))
+            .collect();
+        for (&block, &target) in links {
+            let refuse = |reason| DocumentError::InvalidImplicitLink {
+                block,
+                target,
+                reason,
+            };
+            let source_position = positions
+                .get(&block)
+                .copied()
+                .ok_or_else(|| refuse("source block does not exist"))?;
+            let target_position = positions
+                .get(&target)
+                .copied()
+                .ok_or_else(|| refuse("target block does not exist"))?;
+            if target_position >= source_position {
+                return Err(refuse("target must precede the source block"));
+            }
+            if analysis.blocks[target_position]
+                .label
+                .as_ref()
+                .is_none_or(|label| label.trim().is_empty())
+            {
+                return Err(refuse("target must have a source label"));
+            }
+            if analysis.blocks[source_position].deps.contains(&target) {
+                return Err(refuse("implicit link duplicates an explicit dependency"));
+            }
+            analysis.blocks[source_position].deps.push(target);
         }
         let revision = self.revision + 1;
         let order: Vec<BlockId> = analysis.blocks.iter().map(|block| block.id).collect();

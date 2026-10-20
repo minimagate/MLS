@@ -15,7 +15,7 @@ mod scheduler;
 
 pub use cache::{LeanCache, LeanCacheEntry, SirCache, SirCacheEntry, SirProvenance, sir_cache_key};
 pub use document::{BlockState, ChangeSet, Document, DocumentError};
-pub use engine::{ActionError, Engine, EngineConfig, ReviewAction};
+pub use engine::{ActionError, Engine, EngineConfig, ReviewAction, UpdateHints};
 pub use gate::{
     Clock, Finished, FinishedOracle, FinishedQuery, Gate, GateConfig, ManualClock, OracleAnswer,
     SystemClock,

@@ -9,7 +9,8 @@ use mls_core::BlockId;
 use mls_engine::live::{
     ActionError, ChangeSet, Clock, Completion, Document, Engine, EngineConfig, Finished,
     FinishedOracle, FinishedQuery, GateConfig, JobOutcome, JobRunner, LeanCache, ManualClock,
-    OracleAnswer, PipelineRunner, ReviewAction, SirCache, SirProvenance, Stale, sir_cache_key,
+    OracleAnswer, PipelineRunner, ReviewAction, SirCache, SirProvenance, Stale, UpdateHints,
+    sir_cache_key,
 };
 use mls_engine::{BlockStatus, ReviewStore, ReviewView, UsageSummary};
 use mls_models::{GenerationReply, GenerationRequest, GenerationStage, ModelClient, ModelError};
@@ -743,6 +744,295 @@ fn rejecting_a_sir_marks_its_dependents_and_regenerates_the_block() {
         "only the rejected block asks the model again"
     );
     assert_eq!(status(&engine.view(), 1), BlockStatus::NotFormalized);
+}
+
+#[test]
+fn implicit_links_schedule_dependencies_and_invalidate_their_transitive_users() {
+    let mut blocks = three("First claim.");
+    blocks[1].deps.clear();
+    let hints = UpdateHints {
+        implicit_links: BTreeMap::from([(id(2), id(1)), (id(3), id(2))]),
+        ..UpdateHints::default()
+    };
+    let mut engine = engine_with(0);
+    engine
+        .on_change_with_hints(&render(&blocks, "", "\n"), None, 0, &hints)
+        .unwrap();
+    assert_eq!(engine.document().formal_dependencies(id(2)), [id(1)]);
+    assert_eq!(engine.document().formal_dependencies(id(3)), [id(2)]);
+    let mut models = Model::for_blocks(&blocks);
+    models.set(2, &[1], "claim 2");
+    models.set(3, &[2], "claim 3");
+    assert_eq!(settle(&mut engine, &mut models, &mut EchoChecker), 3);
+    assert_eq!(models.sir_calls, [id(1), id(2), id(3)]);
+    assert!(
+        engine
+            .view()
+            .blocks
+            .iter()
+            .all(|block| block.status == BlockStatus::SirDrafted)
+    );
+    blocks[0].text.push_str(" Changed.");
+    engine
+        .on_change_with_hints(&render(&blocks, "", "\n"), None, 10, &hints)
+        .unwrap();
+    assert_eq!(engine.dirty(), &BTreeSet::from([id(1), id(2), id(3)]));
+    // Removing the overlay also invalidates users from the preceding graph.
+    engine
+        .on_change(&render(&blocks, "", "\n"), None, 20)
+        .unwrap();
+    assert!(engine.document().formal_dependencies(id(2)).is_empty());
+    assert!(engine.dirty().contains(&id(2)));
+    assert!(engine.dirty().contains(&id(3)));
+}
+
+#[test]
+fn implicit_links_are_strict_atomic_and_append_after_explicit_reference_order() {
+    let blocks = three("First.");
+    let source = render(&blocks, "", "\n");
+    let mut document = Document::new();
+    document.update(&source).unwrap();
+    for links in [
+        BTreeMap::from([(id(99), id(1))]),
+        BTreeMap::from([(id(2), id(99))]),
+        BTreeMap::from([(id(1), id(2))]),
+        BTreeMap::from([(id(1), id(1))]),
+        BTreeMap::from([(id(2), id(1))]),
+    ] {
+        assert!(matches!(
+            document.update_with_links(&source, &links),
+            Err(mls_engine::live::DocumentError::InvalidImplicitLink { .. })
+        ));
+        assert_eq!(document.revision(), 1);
+        assert_eq!(document.source(), source);
+    }
+    let unlabeled = String::from_utf8(source.clone())
+        .unwrap()
+        .replacen("<label|thm:b1>", "", 1);
+    assert!(
+        document
+            .update_with_links(unlabeled.as_bytes(), &BTreeMap::from([(id(3), id(1))]))
+            .is_err()
+    );
+    assert_eq!(document.source(), source);
+    let mut ordered = blocks.clone();
+    ordered[2].deps = vec![1];
+    document
+        .update_with_links(
+            &render(&ordered, "", "\n"),
+            &BTreeMap::from([(id(3), id(2))]),
+        )
+        .unwrap();
+    assert_eq!(document.block(id(3)).unwrap().deps, [id(1), id(2)]);
+}
+
+#[test]
+fn explicit_and_implicit_edges_share_cycle_errors_and_engine_atomicity() {
+    let mut blocks = three("First.");
+    blocks[0].deps = vec![2];
+    blocks[1].deps.clear();
+    let mut engine = engine_with(0);
+    let hints = UpdateHints {
+        implicit_links: BTreeMap::from([(id(2), id(1))]),
+        ..UpdateHints::default()
+    };
+    let source = render(&blocks, "", "\n");
+    engine
+        .on_change_with_hints(&source, None, 0, &hints)
+        .unwrap();
+    assert!(
+        engine
+            .view()
+            .blocks
+            .iter()
+            .filter(|b| [id(1), id(2)].contains(&b.block_id))
+            .all(|b| b.errors == ["dependency cycle prevents formalization"])
+    );
+    let before = serde_json::to_value(engine.view()).unwrap();
+    let dirty = engine.dirty().clone();
+    let invalid = UpdateHints {
+        implicit_links: BTreeMap::from([(id(99), id(1))]),
+        cosmetic_edits: BTreeSet::from([id(3)]),
+    };
+    assert!(
+        engine
+            .on_change_with_hints(&source, None, 10, &invalid)
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(engine.view()).unwrap(), before);
+    assert_eq!(engine.dirty(), &dirty);
+    assert_eq!(engine.document().revision(), 1);
+}
+
+#[test]
+fn safe_cosmetic_hint_updates_text_and_discards_work_without_a_sir_or_status() {
+    let mut blocks = three("First.");
+    let mut engine = engine_with(0);
+    engine
+        .on_change(&render(&blocks, "", "\n"), None, 0)
+        .unwrap();
+    assert!(engine.cosmetic_hint_eligible(id(3)));
+    let old = engine.document().block(id(3)).unwrap().text_hash.clone();
+    blocks[2].text.push_str(" Reworded.");
+    let hints = UpdateHints {
+        cosmetic_edits: BTreeSet::from([id(3)]),
+        ..UpdateHints::default()
+    };
+    engine
+        .on_change_with_hints(&render(&blocks, "", "\n"), None, 10, &hints)
+        .unwrap();
+    assert_ne!(engine.document().block(id(3)).unwrap().text_hash, old);
+    assert!(!engine.dirty().contains(&id(3)));
+    assert_eq!(engine.dirty(), &BTreeSet::from([id(1), id(2)]));
+    let view = engine.view();
+    let block = view.blocks.iter().find(|b| b.block_id == id(3)).unwrap();
+    assert_eq!(block.status, BlockStatus::NotFormalized);
+    assert!(block.needs_rerun);
+    assert!(block.sir.is_none());
+    assert!(block.lean_statement.is_none());
+    assert!(engine.sir_cache().is_empty());
+    assert!(engine.lean_cache().is_empty());
+    assert!(engine.retry(id(3), 20), "explicit retry remains available");
+    assert!(engine.dirty().contains(&id(3)));
+}
+
+#[test]
+fn cosmetic_hints_cannot_reuse_drafts_confirmations_or_cached_sirs() {
+    let mut blocks = three("First.");
+    let mut engine = engine_with(0);
+    engine
+        .on_change(&render(&blocks, "", "\n"), None, 0)
+        .unwrap();
+    settle(
+        &mut engine,
+        &mut Model::for_blocks(&blocks),
+        &mut EchoChecker,
+    );
+    assert!(
+        !engine.cosmetic_hint_eligible(id(3)),
+        "settled draft SIR already exists"
+    );
+    confirm_all(&mut engine, &[3]);
+    blocks[2].text.push_str(" Reworded.");
+    let hints = UpdateHints {
+        cosmetic_edits: BTreeSet::from([id(3)]),
+        ..UpdateHints::default()
+    };
+    engine
+        .on_change_with_hints(&render(&blocks, "", "\n"), None, 10, &hints)
+        .unwrap();
+    assert!(engine.dirty().contains(&id(3)));
+    assert_ne!(status(&engine.view(), 3), BlockStatus::StatementConfirmed);
+
+    // Forgetting a block's local report does not make an old cached SIR a cosmetic shortcut.
+    let original = three("First.");
+    engine
+        .on_change(&render(&original[..2], "", "\n"), None, 20)
+        .unwrap();
+    engine
+        .on_change(&render(&original, "", "\n"), None, 30)
+        .unwrap();
+    engine.review_mut().forget(id(3));
+    assert!(
+        !engine.cosmetic_hint_eligible(id(3)),
+        "current text still has a cached SIR"
+    );
+}
+
+#[test]
+fn unsafe_cosmetic_hints_fall_back_for_dependencies_metadata_and_in_flight_jobs() {
+    let blocks = three("First.");
+    let hints = UpdateHints {
+        cosmetic_edits: BTreeSet::from([id(2), id(3), id(99)]),
+        ..UpdateHints::default()
+    };
+    let mut engine = engine_with(0);
+    engine
+        .on_change(&render(&blocks, "", "\n"), None, 0)
+        .unwrap();
+    let mut edited = blocks.clone();
+    edited[0].text.push_str(" Semantic change.");
+    edited[1].text.push_str(" Reworded.");
+    edited[2].deps.push(1);
+    engine
+        .on_change_with_hints(&render(&edited, "", "\n"), None, 10, &hints)
+        .unwrap();
+    assert_eq!(engine.dirty(), &BTreeSet::from([id(1), id(2), id(3)]));
+
+    let mut engine = engine_with(0);
+    engine
+        .on_change(&render(&blocks, "", "\n"), None, 0)
+        .unwrap();
+    let first = engine.next_job(0).unwrap();
+    let pending = engine.next_job(0).unwrap();
+    assert_eq!(pending.block, id(3));
+    assert!(!engine.cosmetic_hint_eligible(id(3)));
+    let mut edited = blocks.clone();
+    edited[2].text.push_str(" Reworded.");
+    engine
+        .on_change_with_hints(&render(&edited, "", "\n"), None, 10, &hints)
+        .unwrap();
+    assert!(engine.dirty().contains(&id(3)));
+    assert_eq!(
+        engine.complete(
+            pending,
+            JobOutcome::Failed {
+                message: "old text".into(),
+                usage: UsageSummary::default()
+            }
+        ),
+        Completion::Stale(Stale::TextChanged)
+    );
+    assert!(engine.abandon(&first));
+}
+
+#[test]
+fn cosmetic_hints_require_no_review_only_sir_and_no_label_change() {
+    let blocks = three("First.");
+    let source = render(&blocks, "", "\n");
+    let hints = UpdateHints {
+        cosmetic_edits: BTreeSet::from([id(3)]),
+        ..UpdateHints::default()
+    };
+    let mut engine = engine_with(0);
+    engine.on_change(&source, None, 0).unwrap();
+    settle_none(&mut engine);
+    assert!(engine.cosmetic_hint_eligible(id(3)));
+    engine
+        .on_review(
+            ReviewAction::Edit {
+                block: id(3),
+                sir_json: sir(3, "theorem", &label(3), vec![], "claim 3")
+                    .output
+                    .to_string(),
+            },
+            10,
+        )
+        .unwrap();
+    assert!(
+        !engine.cosmetic_hint_eligible(id(3)),
+        "the review SIR alone prevents skipping"
+    );
+    let mut edited = blocks.clone();
+    edited[2].text.push_str(" Reworded.");
+    engine
+        .on_change_with_hints(&render(&edited, "", "\n"), None, 20, &hints)
+        .unwrap();
+    assert!(engine.dirty().contains(&id(3)));
+    assert_ne!(status(&engine.view(), 3), BlockStatus::StatementConfirmed);
+
+    let mut engine = engine_with(0);
+    engine.on_change(&source, None, 0).unwrap();
+    let renamed = String::from_utf8(render(&edited, "", "\n"))
+        .unwrap()
+        .replacen("<label|thm:b3>", "<label|thm:new-name>", 1);
+    engine
+        .on_change_with_hints(renamed.as_bytes(), None, 10, &hints)
+        .unwrap();
+    assert!(
+        engine.dirty().contains(&id(3)),
+        "a changed source label is not a text-only edit"
+    );
 }
 
 #[test]

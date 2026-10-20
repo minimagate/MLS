@@ -786,6 +786,29 @@ impl<D: Decider> DecisionLayer<D> {
     }
 }
 
+impl<D: Decider> crate::live::FinishedOracle for DecisionLayer<D> {
+    fn is_finished(&mut self, query: &crate::live::FinishedQuery<'_>) -> crate::live::OracleAnswer {
+        let outcome = DecisionLayer::is_finished(self, &query.block.to_string(), query.text);
+        if outcome.basis != Basis::Jev {
+            return crate::live::OracleAnswer::UNKNOWN;
+        }
+        let Some(probability) = noul_probability(outcome.evidence.as_ref()) else {
+            return crate::live::OracleAnswer::UNKNOWN;
+        };
+        match outcome.value {
+            Finished::Yes => crate::live::OracleAnswer {
+                finished: crate::live::Finished::Yes,
+                confidence: probability,
+            },
+            Finished::No => crate::live::OracleAnswer {
+                finished: crate::live::Finished::No,
+                confidence: 1.0 - probability,
+            },
+            Finished::Unknown => crate::live::OracleAnswer::UNKNOWN,
+        }
+    }
+}
+
 /// A decision's verdict before the fallback is applied, with the evidence behind it.
 struct Judged<T> {
     verdict: Result<T, FallbackReason>,
