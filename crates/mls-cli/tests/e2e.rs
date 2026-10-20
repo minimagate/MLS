@@ -367,7 +367,10 @@ fn batch_refuses_a_tampered_shadow_owner_before_any_model_call() {
     let path = directory.path().join("notes.tm");
     fs::write(&path, source).unwrap();
     let project = directory.path().join(".mls");
-    let shadow = project.join("Shadow");
+    // The document's own module directory: `Doc_` + stem + `_` + 8 hex digits of the file name's
+    // SHA-256, as `document_module` in the CLI derives it.
+    let module = format!("Doc_notes_{}", &mls_core::source_hash(b"notes.tm")[..8]);
+    let shadow = project.join("Shadow").join(module);
     fs::create_dir_all(&shadow).unwrap();
     fs::write(project.join(".mls-owner.json"), b"{\"format\":1}\n").unwrap();
     fs::write(shadow.join(".mls-owner"), b"/elsewhere/other.tm").unwrap();

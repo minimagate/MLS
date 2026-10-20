@@ -8,12 +8,15 @@ use serde::Serialize;
 use std::{
     env,
     error::Error,
+    ffi::OsString,
     fmt, fs,
     io::Write,
     path::{Component, Path, PathBuf},
     process::ExitCode,
     time::Duration,
 };
+
+mod review;
 
 #[derive(Serialize)]
 struct Output<'a> {
@@ -31,6 +34,14 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn main() -> ExitCode {
+    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+    if let Some(command) = arguments
+        .first()
+        .and_then(|argument| argument.to_str())
+        .filter(|command| review::is_review_command(command))
+    {
+        return review::dispatch(command, &arguments[1..]);
+    }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -159,8 +170,14 @@ fn batch(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Error>> {
     let output = match output {
         Some(candidate) => {
             reject_output_alias(&path, &candidate)?;
-            reject_output_in_mls_directories(&path, &candidate)?;
             let output = absolute_path(&candidate)?;
+            if output_exists(&output) {
+                return Err(Box::new(CliError(format!(
+                    "refusing to overwrite existing output {}",
+                    output.display()
+                ))));
+            }
+            reject_output_in_mls_directories(&path, &candidate)?;
             ensure_output_parent(&output)?;
             Some(output)
         }
@@ -186,14 +203,7 @@ fn batch(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Error>> {
     })?;
     // The model transport is built before any side effect, so a missing replay directory or
     // API key is refused here rather than after the project exists.
-    let transport = match replay {
-        Some(directory) => Transport::Replay(ReplayClient::from_directory(
-            directory,
-            &models.generation_model,
-            &models.decision_model,
-        )?),
-        None => Transport::Live(OpenRouterClient::from_env(models.clone())?),
-    };
+    let transport = build_transport(replay, &models)?;
     preflight_batch(&path, live)?;
     let project = initialize_project(&path)?;
     let mut worker = spawn_worker(&project)?;
@@ -226,6 +236,22 @@ fn batch(arguments: &[std::ffi::OsString]) -> Result<(), Box<dyn Error>> {
     };
     publish(output, &report, persistence, || {
         write_shadow(&path, &analysis, &report)
+    })
+}
+
+/// Builds the model transport for a batch or review run. Replay is chosen only by `--replay`; a
+/// missing replay directory or API key is refused here, before any side effect.
+fn build_transport(
+    replay: Option<PathBuf>,
+    models: &ModelConfig,
+) -> Result<Transport, Box<dyn Error>> {
+    Ok(match replay {
+        Some(directory) => Transport::Replay(ReplayClient::from_directory(
+            directory,
+            &models.generation_model,
+            &models.decision_model,
+        )?),
+        None => Transport::Live(OpenRouterClient::from_env(models.clone())?),
     })
 }
 
@@ -352,10 +378,13 @@ fn write_shadow(
     analysis: &mls_tm::Analysis,
     report: &BatchReport,
 ) -> Result<(), Box<dyn Error>> {
+    let root = shadow_root(document);
+    migrate_flat_shadow(document, &root)?;
+    ensure_owned_dir(&root)?;
     let directory = shadow_directory(document);
     prepare_shadow_directory(document, &directory)?;
     let sections = shadow_sections(analysis, report);
-    write_shadow_sections(&directory, &sections)
+    write_shadow_sections(&directory, &document_module(document), &sections)
 }
 
 /// Writes generated sections so that every file MLS creates is listed in the ownership manifest
@@ -363,9 +392,10 @@ fn write_shadow(
 /// or write, so a refused run leaves the directory exactly as it was.
 fn write_shadow_sections(
     directory: &Path,
+    module: &str,
     sections: &[ShadowSection],
 ) -> Result<(), Box<dyn Error>> {
-    let generated = generate_shadow_project(sections)?;
+    let generated = generate_shadow_project(module, sections)?;
     let manifest_path = directory.join(SHADOW_MANIFEST);
     let old = read_shadow_manifest(&manifest_path)?;
     let names: Vec<String> = generated
@@ -509,6 +539,7 @@ const PROJECT_BUILD_FILES: [&str; 5] = [
     "MlsExtract.olean.hash",
     "MlsExtract.ilean.hash",
 ];
+const SHADOW_ROOT: &str = "Shadow";
 const SHADOW_OWNER: &str = ".mls-owner";
 const SHADOW_MANIFEST: &str = ".mls-files.json";
 
@@ -519,8 +550,89 @@ fn project_directory(document: &Path) -> PathBuf {
         .join(".mls")
 }
 
+/// The Shadow library shared by the documents of one directory. Each document owns one module
+/// directory below it, so documents in the same directory never write into each other's files.
+fn shadow_root(document: &Path) -> PathBuf {
+    project_directory(document).join(SHADOW_ROOT)
+}
+
 fn shadow_directory(document: &Path) -> PathBuf {
-    project_directory(document).join("Shadow")
+    shadow_root(document).join(document_module(document))
+}
+
+/// The Lean module component of a document's Shadow directory: `Doc_`, the ASCII alphanumerics of
+/// the file stem (other characters become `_`, at most 40 of them), `_`, and the first 8 hex digits
+/// of the SHA-256 of the whole file name. The hash keeps names apart and makes them valid
+/// identifiers whatever the file name is.
+fn document_module(document: &Path) -> String {
+    let name = document
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let stem = name.strip_suffix(".tm").unwrap_or(&name);
+    let readable: String = stem
+        .chars()
+        .take(40)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let digest = mls_core::source_hash(name.as_bytes());
+    format!("Doc_{readable}_{}", &digest[..8])
+}
+
+/// The M2 flat layout kept its files directly in `.mls/Shadow`, owned by the one document that
+/// `.mls/Shadow/.mls-owner` names. Returns the files that document owns there, or `None` when the
+/// flat layout is absent or belongs to another document. Such files are never touched by this
+/// document. Read-only: every refusal happens here, before any removal.
+fn flat_shadow_owned_by_document(
+    document: &Path,
+    root: &Path,
+) -> Result<Option<Vec<String>>, Box<dyn Error>> {
+    if !is_occupied(root)? {
+        return Ok(None);
+    }
+    ensure_plain_dir_if_present(root)?;
+    let marker = root.join(SHADOW_OWNER);
+    if !is_occupied(&marker)? || ensure_regular_owned(&marker).is_err() {
+        return Ok(None);
+    }
+    if fs::read_to_string(&marker)? != document.to_string_lossy() {
+        return Ok(None);
+    }
+    let names = read_shadow_manifest(&root.join(SHADOW_MANIFEST))
+        .and_then(|names| {
+            for name in &names {
+                ensure_regular_if_present(&root.join(name))?;
+            }
+            Ok(names)
+        })
+        .map_err(|error| {
+            CliError(format!(
+                "cannot migrate the M2 Shadow layout of this document ({error}); delete {} and run again",
+                root.display()
+            ))
+        })?;
+    Ok(Some(names))
+}
+
+/// Removes the M2 flat layout that this document owns, once the new per-document layout is
+/// ready to be written. Only manifest-listed regular files are removed; the manifest and the owner
+/// marker go last, so an interrupted migration is retried by the next run.
+fn migrate_flat_shadow(document: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
+    let Some(names) = flat_shadow_owned_by_document(document, root)? else {
+        return Ok(());
+    };
+    for name in &names {
+        remove_owned_if_present(&root.join(name))?;
+    }
+    remove_owned_if_present(&root.join(SHADOW_MANIFEST))?;
+    remove_owned_if_present(&root.join(SHADOW_OWNER))
 }
 
 /// Read-only preflight: runs every refusal that the later writes would make on the project, the
@@ -551,9 +663,13 @@ fn preflight_project(document: &Path, template: &Path, live: bool) -> Result<(),
     Ok(())
 }
 
-/// Mirrors `prepare_shadow_directory` and `write_shadow_sections` for an existing Shadow directory.
-/// An empty directory is claimed by the writer; a non-empty one must carry this document's marker.
+/// Mirrors `write_shadow` for this document's module directory. The M2 flat layout is checked
+/// too, so a migration that would be refused is refused before any model call. An empty module
+/// directory is claimed by the writer; a non-empty one must carry this document's marker.
 fn preflight_shadow(document: &Path) -> Result<(), Box<dyn Error>> {
+    let root = shadow_root(document);
+    ensure_plain_dir_if_present(&root)?;
+    flat_shadow_owned_by_document(document, &root)?;
     let directory = shadow_directory(document);
     ensure_plain_dir_if_present(&directory)?;
     if !is_occupied(&directory)? || fs::read_dir(&directory)?.next().is_none() {
@@ -754,13 +870,12 @@ fn reject_output_alias(input: &Path, output: &Path) -> Result<(), Box<dyn Error>
             "--output must not alias the input document".into(),
         )));
     }
-    if fs::symlink_metadata(&output).is_ok() {
-        return Err(Box::new(CliError(format!(
-            "refusing to overwrite existing output {}",
-            output.display()
-        ))));
-    }
     Ok(())
+}
+
+/// Whether anything, including a dangling symlink, already exists at an absolute output path.
+fn output_exists(output: &Path) -> bool {
+    fs::symlink_metadata(output).is_ok()
 }
 
 /// Refuses an output inside an MLS project directory before any side effect: the document-adjacent
@@ -956,7 +1071,8 @@ fn prepare_shadow_directory(document: &Path, directory: &Path) -> Result<(), Box
             )));
         }
     } else {
-        fs::create_dir_all(directory)?;
+        // The Shadow root was created by the caller, so only the module directory is new.
+        fs::create_dir(directory)?;
         atomic_create(&marker, identity.as_bytes())?;
     }
     Ok(())
@@ -981,6 +1097,7 @@ fn print_help() {
     println!(
         "Usage:\n  mls [--write-ids] FILE.tm\n  mls batch FILE.tm (--replay DIR | --live) [--model-config FILE] [--output FILE] [--max-attempts N]\n\nBatch mode is offline unless --live and MLS_LIVE=1 are both supplied."
     );
+    review::print_help();
 }
 
 #[cfg(test)]
@@ -1140,6 +1257,8 @@ mod tests {
         );
     }
 
+    const MODULE: &str = "Doc_notes_00000000";
+
     fn section(name: &str) -> ShadowSection {
         ShadowSection {
             name: name.into(),
@@ -1159,7 +1278,7 @@ mod tests {
         )
         .unwrap();
 
-        write_shadow_sections(&directory, &[section("Section1")]).unwrap();
+        write_shadow_sections(&directory, MODULE, &[section("Section1")]).unwrap();
 
         let manifest: Vec<String> =
             serde_json::from_slice(&fs::read(directory.join(".mls-files.json")).unwrap()).unwrap();
@@ -1178,7 +1297,7 @@ mod tests {
         fs::write(directory.join("Section2.lean"), b"owned stale").unwrap();
         fs::write(directory.join("Section1.lean"), b"user file").unwrap();
 
-        let error = write_shadow_sections(&directory, &[section("Section1")])
+        let error = write_shadow_sections(&directory, MODULE, &[section("Section1")])
             .unwrap_err()
             .to_string();
         assert!(error.contains("unowned"));
@@ -1195,6 +1314,141 @@ mod tests {
             manifest
         );
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn document_modules_are_valid_distinct_identifiers() {
+        let names = [
+            "notes.tm",
+            "notes-2.tm",
+            "Notes.tm",
+            "a b.tm",
+            "7 days.tm",
+            "\u{e8}t\u{e9}.tm",
+            ".tm",
+        ];
+        let modules: Vec<String> = names
+            .iter()
+            .map(|name| document_module(Path::new(&format!("/d/{name}"))))
+            .collect();
+        for module in &modules {
+            assert!(module.starts_with("Doc_"), "{module}");
+            assert!(
+                module
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+                "{module}"
+            );
+        }
+        let distinct: std::collections::BTreeSet<_> = modules.iter().collect();
+        assert_eq!(distinct.len(), modules.len());
+        assert_eq!(
+            document_module(Path::new("/d/notes.tm")),
+            document_module(Path::new("/other/notes.tm")),
+            "the module depends on the file name only"
+        );
+    }
+
+    #[test]
+    fn two_documents_in_one_directory_claim_separate_shadow_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let template = template_fixture(temporary.path());
+        let first = temporary.path().join("notes.tm");
+        let second = temporary.path().join("other.tm");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        initialize_project_from(&first, &template).unwrap();
+
+        preflight_project(&first, &template, false).unwrap();
+        preflight_project(&second, &template, false).unwrap();
+        let sections = [section("Section1")];
+        for document in [&first, &second] {
+            let root = shadow_root(document);
+            ensure_owned_dir(&root).unwrap();
+            let directory = shadow_directory(document);
+            prepare_shadow_directory(document, &directory).unwrap();
+            write_shadow_sections(&directory, &document_module(document), &sections).unwrap();
+        }
+        assert!(shadow_directory(&first).join("Section1.lean").is_file());
+        assert!(shadow_directory(&second).join("Section1.lean").is_file());
+        assert_ne!(shadow_directory(&first), shadow_directory(&second));
+        preflight_project(&first, &template, false).unwrap();
+    }
+
+    #[test]
+    fn m2_flat_layout_of_this_document_is_migrated_and_user_files_are_kept() {
+        let temporary = tempfile::tempdir().unwrap();
+        let template = template_fixture(temporary.path());
+        let document = temporary.path().join("notes.tm");
+        fs::write(&document, b"document").unwrap();
+        let project = initialize_project_from(&document, &template).unwrap();
+        let root = project.join("Shadow");
+        fs::create_dir(&root).unwrap();
+        fs::write(
+            root.join(SHADOW_OWNER),
+            document.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        fs::write(root.join(SHADOW_MANIFEST), br#"["Section1.lean"]"#).unwrap();
+        fs::write(root.join("Section1.lean"), b"old flat").unwrap();
+        fs::write(root.join("Mine.lean"), b"user file").unwrap();
+
+        preflight_project(&document, &template, false).unwrap();
+        migrate_flat_shadow(&document, &root).unwrap();
+        assert!(!root.join("Section1.lean").exists());
+        assert!(!root.join(SHADOW_MANIFEST).exists());
+        assert!(!root.join(SHADOW_OWNER).exists());
+        assert_eq!(fs::read(root.join("Mine.lean")).unwrap(), b"user file");
+    }
+
+    #[test]
+    fn m2_flat_layout_of_another_document_is_left_alone() {
+        let temporary = tempfile::tempdir().unwrap();
+        let template = template_fixture(temporary.path());
+        let document = temporary.path().join("notes.tm");
+        fs::write(&document, b"document").unwrap();
+        let project = initialize_project_from(&document, &template).unwrap();
+        let root = project.join("Shadow");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(SHADOW_OWNER), b"/elsewhere/other.tm").unwrap();
+        fs::write(root.join(SHADOW_MANIFEST), br#"["Section1.lean"]"#).unwrap();
+        fs::write(root.join("Section1.lean"), b"other's flat file").unwrap();
+
+        let before = tree(temporary.path());
+        preflight_project(&document, &template, false).unwrap();
+        migrate_flat_shadow(&document, &root).unwrap();
+        assert_eq!(tree(temporary.path()), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m2_flat_layout_with_an_unsafe_entry_is_refused_with_a_clear_message() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let template = template_fixture(temporary.path());
+        let document = temporary.path().join("notes.tm");
+        fs::write(&document, b"document").unwrap();
+        let project = initialize_project_from(&document, &template).unwrap();
+        let root = project.join("Shadow");
+        fs::create_dir(&root).unwrap();
+        let elsewhere = temporary.path().join("elsewhere.lean");
+        fs::write(&elsewhere, b"outside").unwrap();
+        fs::write(
+            root.join(SHADOW_OWNER),
+            document.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        fs::write(root.join(SHADOW_MANIFEST), br#"["Section1.lean"]"#).unwrap();
+        symlink(&elsewhere, root.join("Section1.lean")).unwrap();
+
+        let before = tree(temporary.path());
+        let error = preflight_project(&document, &template, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("delete"), "{error}");
+        assert_eq!(tree(temporary.path()), before);
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"outside");
     }
 
     fn empty_report() -> BatchReport {
@@ -1278,8 +1532,8 @@ mod tests {
         let document = temporary.path().join("notes.tm");
         fs::write(&document, b"document").unwrap();
         let project = initialize_project_from(&document, &template).unwrap();
-        let shadow = project.join("Shadow");
-        fs::create_dir(&shadow).unwrap();
+        let shadow = project.join("Shadow").join(document_module(&document));
+        fs::create_dir_all(&shadow).unwrap();
         fs::write(shadow.join(SHADOW_OWNER), b"/elsewhere/other.tm").unwrap();
         fs::write(shadow.join(SHADOW_MANIFEST), br#"["Section1.lean"]"#).unwrap();
         fs::write(shadow.join("Section1.lean"), b"owned").unwrap();
@@ -1299,8 +1553,8 @@ mod tests {
         let document = temporary.path().join("notes.tm");
         fs::write(&document, b"document").unwrap();
         let project = initialize_project_from(&document, &template).unwrap();
-        let shadow = project.join("Shadow");
-        fs::create_dir(&shadow).unwrap();
+        let shadow = project.join("Shadow").join(document_module(&document));
+        fs::create_dir_all(&shadow).unwrap();
         fs::write(
             shadow.join(SHADOW_OWNER),
             document.to_string_lossy().as_bytes(),

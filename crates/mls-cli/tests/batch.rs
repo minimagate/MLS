@@ -9,6 +9,56 @@ fn fixture(path: &str) -> std::path::PathBuf {
         .join(path)
 }
 
+/// The only document module directory under `.mls/Shadow` of a project with one document.
+fn module_directory(project: &Path) -> std::path::PathBuf {
+    let mut directories: Vec<_> = fs::read_dir(project.join(".mls/Shadow"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(directories.len(), 1, "{directories:?}");
+    directories.pop().unwrap()
+}
+
+/// The module name of a document directory, as the Lean import names it.
+fn module_name(directory: &Path) -> String {
+    directory
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// A generated section with its own module path replaced, so that it compares with the fixtures.
+fn normalized(text: &str, module: &str) -> String {
+    text.replace(&format!("Shadow.{module}."), "Shadow.")
+}
+
+/// Runs `lake build Shadow` in the project with the pinned toolchain.
+fn lake_build_shadow(project: &Path) -> std::process::Output {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap();
+    let lean_bin = repository.join(".toolchains/lean-4.19.0-darwin_aarch64/bin");
+    let path = format!(
+        "{}:{}",
+        lean_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    Command::new(lean_bin.join("lake"))
+        .current_dir(project.join(".mls"))
+        .args(["build", "Shadow"])
+        .env("PATH", path)
+        .env(
+            "MATHLIB_CACHE_DIR",
+            repository.join(".toolchains/mathlib-cache"),
+        )
+        .env_remove("OPENROUTER_API_KEY")
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn recorded_tm_to_real_lean_report_and_shadow_project() {
     if std::env::var("MLS_LEAN_TESTS").as_deref() != Ok("1") {
@@ -55,9 +105,10 @@ fn recorded_tm_to_real_lean_report_and_shadow_project() {
         assert!(block.get("verified").is_none());
     }
 
-    let shadow = temporary.path().join(".mls/Shadow");
+    let shadow = module_directory(temporary.path());
+    let module = module_name(&shadow);
     for name in ["Section1.lean", "Section2.lean"] {
-        let actual = fs::read_to_string(shadow.join(name)).unwrap();
+        let actual = normalized(&fs::read_to_string(shadow.join(name)).unwrap(), &module);
         let expected = fs::read_to_string(fixture(&format!("lean/pipeline/{name}"))).unwrap();
         assert_eq!(actual, expected, "{name}");
     }
@@ -99,7 +150,7 @@ fn rerun_recreates_a_deleted_generated_section_listed_in_the_manifest() {
         "stderr={}",
         String::from_utf8_lossy(&first.stderr)
     );
-    let shadow = temporary.path().join(".mls/Shadow");
+    let shadow = module_directory(temporary.path());
     fs::remove_file(shadow.join("Section2.lean")).unwrap();
 
     let second = run("second.json");
@@ -151,7 +202,7 @@ fn replay_failure_never_falls_back_to_live_transport() {
     assert!(output.status.success());
     let report: Value =
         serde_json::from_slice(&fs::read(temporary.path().join("report.json")).unwrap()).unwrap();
-    assert_eq!(report["blocks"][0]["status"], "formalization_error");
+    assert_eq!(report["blocks"][0]["status"], "not_formalized");
     assert_eq!(
         report["blocks"][0]["errors"][0],
         "no exact replay match for request"
@@ -204,34 +255,16 @@ fn generated_cross_section_dependency_compiles_with_pinned_project() {
         "expected 1, got 1"
     );
 
-    let section1 = fs::read_to_string(temporary.path().join(".mls/Shadow/Section1.lean")).unwrap();
-    let section2 = fs::read_to_string(temporary.path().join(".mls/Shadow/Section2.lean")).unwrap();
+    let shadow = module_directory(temporary.path());
+    let module = module_name(&shadow);
+    let section1 = fs::read_to_string(shadow.join("Section1.lean")).unwrap();
+    let section2 = fs::read_to_string(shadow.join("Section2.lean")).unwrap();
     let dependency_name = "mls_00000000_0000_4000_8000_000000000007";
     assert!(section1.contains(&format!("def {dependency_name} (x : Nat) : Nat := x")));
-    assert!(section2.contains("import Shadow.Section1"));
+    assert!(section2.contains(&format!("import Shadow.{module}.Section1")));
     assert!(section2.contains(&format!("{dependency_name} 0 = 0")));
 
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .unwrap();
-    let lean_bin = repository.join(".toolchains/lean-4.19.0-darwin_aarch64/bin");
-    let path = format!(
-        "{}:{}",
-        lean_bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let build = Command::new(lean_bin.join("lake"))
-        .current_dir(temporary.path().join(".mls"))
-        .args(["build", "Shadow"])
-        .env("PATH", path)
-        .env(
-            "MATHLIB_CACHE_DIR",
-            repository.join(".toolchains/mathlib-cache"),
-        )
-        .env_remove("OPENROUTER_API_KEY")
-        .output()
-        .unwrap();
+    let build = lake_build_shadow(temporary.path());
     assert!(
         build.status.success(),
         "stdout={}\nstderr={}",
@@ -241,7 +274,80 @@ fn generated_cross_section_dependency_compiles_with_pinned_project() {
     assert!(
         temporary
             .path()
-            .join(".mls/.lake/build/lib/lean/Shadow/Section2.olean")
+            .join(".mls/.lake/build/lib/lean/Shadow")
+            .join(&module)
+            .join("Section2.olean")
             .is_file()
     );
+}
+
+#[test]
+fn two_documents_in_one_directory_build_side_by_side() {
+    if std::env::var("MLS_LEAN_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipped: set MLS_LEAN_TESTS=1 to run the pinned local runtime");
+        return;
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    fs::copy(
+        fixture("lean/pipeline/success.tm"),
+        temporary.path().join("notes.tm"),
+    )
+    .unwrap();
+    fs::copy(
+        fixture("lean/pipeline/dependency.tm"),
+        temporary.path().join("other.tm"),
+    )
+    .unwrap();
+    for (document, recording) in [
+        ("notes.tm", "recordings/pipeline/success"),
+        ("other.tm", "recordings/pipeline/dependency"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mls"))
+            .current_dir(temporary.path())
+            .args([
+                "batch",
+                document,
+                "--replay",
+                fixture(recording).to_str().unwrap(),
+                "--output",
+                &format!("{document}.report.json"),
+            ])
+            .env_remove("MLS_LIVE")
+            .env_remove("OPENROUTER_API_KEY")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{document}: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut directories: Vec<_> = fs::read_dir(temporary.path().join(".mls/Shadow"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    directories.sort();
+    assert_eq!(directories.len(), 2, "{directories:?}");
+    let build = lake_build_shadow(temporary.path());
+    assert!(
+        build.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    for directory in &directories {
+        let module = module_name(directory);
+        for entry in fs::read_dir(directory).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if let Some(section) = name.strip_suffix(".lean") {
+                let olean = temporary
+                    .path()
+                    .join(".mls/.lake/build/lib/lean/Shadow")
+                    .join(&module)
+                    .join(format!("{section}.olean"));
+                assert!(olean.is_file(), "{}", olean.display());
+            }
+        }
+    }
 }
