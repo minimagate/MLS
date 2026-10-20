@@ -1,9 +1,12 @@
 ;;; mls-badges.scm -- status pills beside every formal block heading.
 ;;;
 ;;; The style package plugins/mls/packages/mls-badges.ts makes render-theorem call
-;;; (mls-badge id color) through extern while TeXmacs typesets, so theorem, lemma,
+;;; (mls-badge id) through extern while TeXmacs typesets, so theorem, lemma,
 ;;; proposition, corollary and definition headings get pills computed from the engine
 ;;; view. Badges compute no status: they only present the view and the live dirty set.
+;;; Each pill is an (mls-pill tone shape body) tag; mls-pill-render picks its colours
+;;; from the text colour where it is typeset, so pills suit light and dark pages and the
+;;; MLS panel uses the same tag.
 ;;;
 ;;; The package is attached to the MLS document in memory only. The glue procedures
 ;;; buffer-save, buffer-export and print-to-file are wrapped so the package is removed
@@ -82,9 +85,6 @@
         ((member color '("white" "light grey" "pastel grey")) #t)
         (else #f)))
 
-(define (mls-badge-tone palette tone)
-  (cdr (assq tone palette)))
-
 ;;; Choosing the pills of a block (pure: no view lookup, no time)
 
 (define (mls-badge-view-block id)
@@ -158,26 +158,35 @@ is filled or outline; ACTION is open or retry."
   (string-append (if (eq? action 'retry) "(mls-badge-retry " "(mls-badge-open ")
                  "\"" id "\")"))
 
-(define (mls-badge-pill spec id palette)
-  (let* ((shape (car spec))
-         (colors (mls-badge-tone palette (cadr spec)))
-         (fill (if (eq? shape 'outline) "" (car colors)))
-         (line (cadr colors))
-         (ink (caddr colors))
-         (label (string-append (caddr spec) " " (cadddr spec))))
-    `(mls-chip ,fill ,line ,ink
-               (action ,label ,(mls-badge-command (list-ref spec 4) id)))))
+(define (mls-badge-pill spec id)
+  "One pill. With a block ID the pill is clickable; without one it is a plain label."
+  (let ((label (string-append (caddr spec) " " (cadddr spec))))
+    `(mls-pill ,(symbol->string (cadr spec)) ,(symbol->string (car spec))
+               ,(if id (list 'action label (mls-badge-command (list-ref spec 4) id)) label))))
 
-(define (mls-badge-render specs id dark?)
+(define (mls-badge-pills specs id)
+  "SPECS as a row of pills separated by small gaps."
+  (let loop ((xs specs) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs)
+              (cons (mls-badge-pill (car xs) id)
+                    (if (null? acc) acc (cons '(hspace "0.35fn") acc)))))))
+
+(define (mls-badge-render specs id)
   (if (null? specs)
       ""
-      (let ((palette (if dark? mls-badges-dark mls-badges-light)))
-        `(concat (hspace "0.5spc")
-                 ,@(apply append
-                          (map (lambda (spec)
-                                 (list (mls-badge-pill spec id palette) '(hspace "0.35fn")))
-                               specs))
-                 (hspace "0.4spc")))))
+      `(concat (hspace "0.5spc") ,@(mls-badge-pills specs id) (hspace "0.75spc"))))
+
+(tm-define (mls-pill-render tone-tree shape-tree color-tree body)
+  (:secure #t)
+  (let* ((palette (if (mls-badge-dark-ink? (mls-badge-string color-tree))
+                      mls-badges-dark mls-badges-light))
+         (tone (string->symbol (mls-badge-string tone-tree)))
+         (colors (or (assq tone palette) (assq 'neutral palette)))
+         (outline? (equal? (mls-badge-string shape-tree) "outline")))
+    `(mls-chip ,(if outline? "" (cadr colors)) ,(caddr colors) ,(cadddr colors)
+               ,(if (tree? body) (tree->stree body) body))))
 
 (define (mls-badge-working id)
   (assoc id mls-badges-dirty))
@@ -185,21 +194,23 @@ is filled or outline; ACTION is open or retry."
 (define (mls-badge-live?)
   (and (defined? 'mls-live-connected?) mls-live-connected?))
 
-(tm-define (mls-badge id-tree color-tree)
+(define (mls-badge-block-specs id)
+  "The pills of block ID now: from the view, the live dirty set and the clock."
+  (let* ((block (mls-badge-view-block id))
+         (working (mls-badge-working id))
+         (elapsed (and working (- (current-time) (cdr working)))))
+    (cond (block (mls-badge-specs block working elapsed))
+          ((and (mls-badge-live?) (mls-panel-active-view)) (mls-badge-pending-specs))
+          (else '()))))
+
+(tm-define (mls-badge id-tree)
   (:secure #t)
   (catch #t
     (lambda ()
-      (let ((id (mls-badge-string id-tree))
-            (dark? (mls-badge-dark-ink? (mls-badge-string color-tree))))
-        (if (not (mls-badge-uuid? id))
-            ""
-            (let* ((block (mls-badge-view-block id))
-                   (working (mls-badge-working id))
-                   (elapsed (and working (- (current-time) (cdr working)))))
-              (cond (block (mls-badge-render (mls-badge-specs block working elapsed) id dark?))
-                    ((and (mls-badge-live?) (mls-panel-active-view))
-                     (mls-badge-render (mls-badge-pending-specs) id dark?))
-                    (else ""))))))
+      (let ((id (mls-badge-string id-tree)))
+        (if (mls-badge-uuid? id)
+            (mls-badge-render (mls-badge-block-specs id) id)
+            "")))
     (lambda args "")))
 
 ;;; Pill actions
@@ -288,8 +299,15 @@ were already dirty."
                                      (get-style-list)))))))
     (mls-badges-set-modified! url modified?)))
 
+(define (mls-badges-on-screen? url)
+  "Style changes only stick on the view the window shows, so badges are attached to
+the document only while it is the one on screen."
+  (let ((main (mls-main-buffer)))
+    (and url main (equal? (url->string main) (url->string url)))))
+
 (define (mls-badges-attach! url)
-  (when (and url (buffer-exists? url) (not (mls-badges-attached? url)))
+  (when (and url (buffer-exists? url) (mls-badges-on-screen? url)
+             (not (mls-badges-attached? url)))
     (mls-badges-change-style! url #t)))
 
 (define (mls-badges-detach! url)
@@ -340,9 +358,26 @@ buffer's modified flag after THUNK is kept, so a save still reads as saved."
         (else mls-current-document)))
 
 (define (mls-badges-redraw)
-  "Attach the package to the MLS document and retypeset it when it is on screen."
+  "Attach the package to the MLS document and retypeset it, when it is on screen."
   (let ((url (mls-badges-document)))
-    (when (and url (buffer-exists? url))
+    (when (and url (buffer-exists? url) (mls-badges-on-screen? url))
       (mls-badges-attach! url)
-      (when (equal? (url->string (current-buffer)) (url->string url))
-        (update-current-buffer)))))
+      (with-buffer url (update-current-buffer)))))
+
+(define (mls-badges-ensure!)
+  "Attach the package again when the user is back on the MLS document without it,
+for example after switching documents or after a save of a background buffer."
+  (let ((url (mls-badges-document)))
+    (when (and url (mls-panel-active-view) (buffer-exists? url)
+               (mls-badges-on-screen? url) (not (mls-badges-attached? url)))
+      (mls-badges-redraw))))
+
+(define mls-badges-ensure-pending? #f)
+
+(tm-define (notify-cursor-moved status)
+  (former status)
+  (when (and (not mls-badges-ensure-pending?) mls-current-view)
+    (set! mls-badges-ensure-pending? #t)
+    (delayed (:idle 300)
+      (set! mls-badges-ensure-pending? #f)
+      (catch #t (lambda () (mls-badges-ensure!)) (lambda args #f)))))

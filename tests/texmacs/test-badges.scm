@@ -66,22 +66,31 @@
    (mls-check-equal "no elapsed label in the first second" "" (mls-badge-elapsed-label 1))
 
    ;; The extern entry point.
-   (let ((pills (mls-badge (string->tree bd-verified) (string->tree "black"))))
-     (mls-check "extern returns chips with clickable open actions"
-                (and (mls-test-contains? (bd-text pills) "mls-chip")
+   (let ((pills (mls-badge (string->tree bd-verified))))
+     (mls-check "extern returns pills with clickable open actions"
+                (and (mls-test-contains? (bd-text pills) "mls-pill")
                      (mls-test-contains? (bd-text pills)
                                          (string-append "(mls-badge-open \\\"" bd-verified "\\\")")))))
-   (mls-check "light page gets the light palette"
-              (mls-test-contains? (bd-text (mls-badge (string->tree bd-verified) (string->tree "black")))
+   (mls-check "a filled pill on a light page gets the light fill"
+              (mls-test-contains? (bd-text (mls-pill-render (string->tree "green") (string->tree "filled")
+                                                            (string->tree "black") (string->tree "x")))
                                   "#eaf3de"))
-   (mls-check "dark page gets the dark palette"
-              (mls-test-contains? (bd-text (mls-badge (string->tree bd-verified) (string->tree "#e4e4e4")))
+   (mls-check "a filled pill on a dark page gets the dark fill"
+              (mls-test-contains? (bd-text (mls-pill-render (string->tree "green") (string->tree "filled")
+                                                            (string->tree "#e4e4e4") (string->tree "x")))
                                   "#27500a"))
+   (mls-check "an outlined pill has no fill"
+              (mls-test-contains? (bd-text (mls-pill-render (string->tree "red") (string->tree "outline")
+                                                            (string->tree "black") (string->tree "x")))
+                                  "(mls-chip \"\" "))
+   (mls-check "an unknown tone falls back to neutral"
+              (mls-test-contains? (bd-text (mls-pill-render (string->tree "x") (string->tree "filled")
+                                                            (string->tree "black") (string->tree "x")))
+                                  "#f1efe8"))
    (mls-check-equal "a block without a view entry has no pills outside a live session"
-                    "" (mls-badge (string->tree "00000000-0000-4000-8000-000000000000")
-                                  (string->tree "black")))
+                    "" (mls-badge (string->tree "00000000-0000-4000-8000-000000000000")))
    (mls-check-equal "a carrier-less theorem (uninitialised mls-id) has no pills"
-                    "" (mls-badge (string->tree "<uninit>") (string->tree "black")))
+                    "" (mls-badge (string->tree "<uninit>")))
 
    ;; The UUID guard: pill commands are Scheme source, so only plain UUIDs pass.
    (mls-check "uuid guard accepts a UUID" (mls-badge-uuid? bd-definition))
@@ -90,7 +99,7 @@
    (mls-check "uuid guard rejects non-hex characters"
               (not (mls-badge-uuid? "520997b8-c353-44cb-bba8-5e69745c065z")))
    (mls-check-equal "an injected id renders no pills"
-                    "" (mls-badge (string->tree "x\") (system \"touch pwned\") (\"") (string->tree "black")))
+                    "" (mls-badge (string->tree "x\") (system \"touch pwned\") (\"")))
    (mls-check-equal "opening a pill with a bad id is refused" #f (mls-badge-open "../../etc"))
 
    ;; The package lives in memory only.

@@ -4,16 +4,22 @@
 ;;; and the keyboard shortcut. The engine owns all state; the plugin only runs
 ;;; `mls review-*` commands and renders their JSON.
 ;;;
-;;; Preferences: mls-engine (engine path, empty for MLS_BIN or PATH) and
-;;; mls-replay-dir (last recordings directory). The live toggle is session-only.
+;;; Preferences: mls-engine (engine path, empty for MLS_BIN or PATH), mls-replay-dir
+;;; (recordings directory), mls-mode (live or replay) and mls-live-consent (whether the
+;;; user allowed live model calls).
 ;;;
-;;; Shortcut: Option+Control+M (A-C-m) runs "Formalize document (replay...)".
-;;; Chosen to avoid the chords already in use: M-backspace, A-backspace,
-;;; M-delete, A-delete, M-1 and M-k (see docs/research/m3-texmacs.md, section 0, item 1).
+;;; The menu has one main command, Start/Stop MLS; everything else lives in the MLS
+;;; panel (mls-ui.scm). One-shot runs stay under Advanced.
+;;;
+;;; Shortcut: Option+Control+M (A-C-m) starts or stops MLS. Chosen to avoid the chords
+;;; already in use: M-backspace, A-backspace, M-delete, A-delete, M-1 and M-k (see
+;;; docs/research/m3-texmacs.md, section 0, item 1).
 
 (define-preferences
   ("mls-engine" "" noop)
-  ("mls-replay-dir" "" noop))
+  ("mls-replay-dir" "" noop)
+  ("mls-mode" "live" noop)
+  ("mls-live-consent" "off" noop))
 
 (define (mls-load-module name)
   (let ((u (url-unix "$TEXMACS_HOME_PATH:$TEXMACS_PATH"
@@ -24,20 +30,25 @@
 
 (for-each mls-load-module
           '("mls-text" "mls-json" "mls-engine" "mls-document"
-            "mls-panel" "mls-review" "mls-badges" "mls-formalize" "mls-live"))
+            "mls-panel" "mls-review" "mls-badges" "mls-formalize" "mls-live" "mls-ui"))
 
 (menu-bind mls-menu
-  ("Formalize document (replay...)" (mls-formalize-replay))
-  ("Formalize document (live)" (mls-formalize-live))
-  ("Start live session" (mls-live-start))
-  ("Stop live session" (mls-live-stop))
-  ("Open live status panel" (mls-live-show-panel))
-  ("Show status" (mls-show-status))
+  ((eval (mls-ui-start-label)) (mls-toggle))
+  ((check "Show MLS panel" "v" mls-ui-panel-open?) (mls-ui-toggle-panel))
   ---
-  ((check "Allow live model calls" "v" (mls-live-allowed?)) (mls-toggle-live)))
+  (-> "Mode"
+      ((check "Live model calls" "*" (mls-mode-live?)) (mls-ui-use-live))
+      ((check "Replay recordings..." "*" (mls-mode-replay?)) (mls-ui-choose-replay)))
+  ("Settings and diagnostics" (mls-ui-diagnostics))
+  ---
+  (-> "Advanced"
+      ((check "Allow live model calls" "v" (mls-live-allowed?)) (mls-toggle-live))
+      ("Status snapshot" (mls-show-status))
+      ("Formalize once from recordings..." (mls-formalize-replay))
+      ("Formalize once with live calls" (mls-formalize-live))))
 
 (tm-menu (plugin-menu) (:require #t)
   (=> "MLS" (link mls-menu)))
 
 (kbd-map
-  ("A-C-m" (mls-formalize-replay)))
+  ("A-C-m" (mls-toggle)))

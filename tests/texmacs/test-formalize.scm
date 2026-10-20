@@ -72,8 +72,12 @@
      (mls-check-equal "badge after replay"
                       "MLS: 2 not formalized, 1 SIR drafted, 0 confirmed, 1 errors"
                       (mls-badge-text mls-current-view))
-     (mls-check "panel buffer holds the status"
-                (mls-test-contains? (mls-test-body-text (string->url "tmfs://aux/mls-status")) "MLS status")))
+     (mls-check "panel buffer holds the status as a snapshot"
+                (let ((panel (mls-test-body-text (string->url "tmfs://aux/mls-status"))))
+                  (and (mls-test-contains? panel "Snapshot")
+                       (mls-test-contains? panel "Definition"))))
+     (mls-check "the document stays the current buffer"
+                (equal? (url->string (current-buffer)) (url->string url))))
 
    ;; 2. unsaved edit before the first run (no sync record yet): refused before anything is
    ;;    written, so the edit is not overwritten by MLS. After the user saves in TeXmacs, the

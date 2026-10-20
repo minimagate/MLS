@@ -1,5 +1,6 @@
-;;; test-panel.scm -- the status panel rows, the footer badge, Go to (cursor lands on the
-;;; carrier), and the index-based panel actions.
+;;; test-panel.scm -- the MLS panel rows (pills, hidden structure blocks, attention
+;;; first), the footer badge, Go to (cursor lands on the carrier), the index-based panel
+;;; actions, and that showing the panel keeps the document current.
 
 (load (string-append (getenv "MLS_TEST_DIR") "/common.scm"))
 
@@ -99,24 +100,35 @@
                           ("statement_confirmed" . 3) ("formalization_error" . 0))))
    (set! proof-tree-text (object->string (mls-panel-tree proof-view)))
    (mls-check "proof outcomes appear without replacing statement status"
-              (and (mls-test-contains? proof-tree-text "statement confirmed")
+              (and (mls-test-contains? proof-tree-text "statement")
                    (mls-test-contains? proof-tree-text "proof verified")
-                   (mls-test-contains? proof-tree-text "proof unproven")
-                   (mls-test-contains? proof-tree-text "proof refuted")))
-   (mls-check "proof marker colors distinguish all outcomes"
-              (and (mls-test-contains? proof-tree-text "green")
-                   (mls-test-contains? proof-tree-text "orange")
-                   (mls-test-contains? proof-tree-text "red")))
+                   (mls-test-contains? proof-tree-text "proof open")
+                   (mls-test-contains? proof-tree-text "refuted")))
+   (mls-check "proof pills are outlined and toned per outcome"
+              (and (mls-test-contains? proof-tree-text "(mls-pill \"green\" \"outline\"")
+                   (mls-test-contains? proof-tree-text "(mls-pill \"neutral\" \"outline\"")
+                   (mls-test-contains? proof-tree-text "(mls-pill \"red\" \"outline\"")))
+   (mls-check "a refuted proof is listed under attention"
+              (mls-test-contains? proof-tree-text "Needs your attention"))
    (mls-check-equal "proof outcome counts appear in badge"
                     "MLS: 0 not formalized, 0 SIR drafted, 3 confirmed, 0 errors; proofs: 1 verified, 1 unproven, 1 refuted"
                     (mls-badge-text proof-view))
 
-   (mls-check-equal "one Go to action per block" 4 (mls-test-count tree-text "\"Go to\""))
-   (mls-check-equal "one Review action per block" 4 (mls-test-count tree-text "\"Review\""))
-   (mls-check "row actions call index entry points"
-              (mls-test-contains? tree-text "(mls-panel-go-to-index 3)"))
-   (mls-check "status names appear" (and (mls-test-contains? tree-text "SIR drafted")
-                                         (mls-test-contains? tree-text "formalization error")))
+   (mls-check-equal "one Go to action per shown block" 2 (mls-test-count tree-text "\"Go to\""))
+   (mls-check-equal "one Review action per shown block" 2 (mls-test-count tree-text "\"Review\""))
+   (mls-check "row actions call index entry points with view indices"
+              (and (mls-test-contains? tree-text "(mls-panel-go-to-index 1)")
+                   (mls-test-contains? tree-text "(mls-panel-go-to-index 2)")))
+   (mls-check "sections and proofs without a status are hidden"
+              (and (not (mls-test-contains? tree-text "(mls-panel-go-to-index 0)"))
+                   (not (mls-test-contains? tree-text "(mls-panel-go-to-index 3)"))))
+   (mls-check "an error row offers Retry" (mls-test-contains? tree-text "(mls-panel-retry-index 2)"))
+   (mls-check "status pills appear" (and (mls-test-contains? tree-text "review draft")
+                                         (mls-test-contains? tree-text "<#00D7> error")))
+   (mls-check "panel pills are not clickable; rows use index actions"
+              (not (mls-test-contains? tree-text "mls-badge-open")))
+   (mls-check "blocks needing a person come first"
+              (mls-test-contains? tree-text "Needs your attention"))
    (mls-check "error message is in the hover balloon"
               (mls-test-contains? tree-text "unknown identifier widget"))
    (mls-check-equal "badge text"
@@ -152,5 +164,9 @@
    (mls-check-equal "render returns the badge"
                     "MLS: 2 not formalized, 1 SIR drafted, 0 confirmed, 1 errors"
                     (mls-render-view view))
-   (mls-check "rendering shows the panel"
-              (mls-test-contains? (mls-test-body-text (string->url mls-panel-name)) "MLS status"))))
+   (mls-check "rendering fills the panel as a snapshot"
+              (mls-test-contains? (mls-test-body-text (string->url mls-panel-name)) "Snapshot"))
+   (mls-check "rendering keeps the document as the current buffer"
+              (not (equal? (url->string (current-buffer)) mls-panel-name)))
+   (mls-check "an empty panel invites a start"
+              (mls-test-contains? (object->string (mls-panel-tree #f)) "Start MLS"))))

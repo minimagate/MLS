@@ -32,11 +32,23 @@
 (define (mls-panel-buffer? url)
   (equal? (url->string url) mls-panel-name))
 
+(define (mls-main-buffer)
+  "The document the user works on: the current buffer, or, while the MLS panel has
+focus, the document shown in the window (else the last MLS document)."
+  (let ((cur (current-buffer)))
+    (if (not (mls-panel-buffer? cur))
+        cur
+        (or (catch #t
+              (lambda ()
+                (let ((shown (window->buffer (current-window))))
+                  (and shown (not (url-none? shown)) (not (mls-panel-buffer? shown)) shown)))
+              (lambda args #f))
+            mls-current-document))))
+
 (define (mls-document-url)
-  "The document MLS acts on: the current buffer, or the last document when the
-status panel has focus. Returns #f after reporting why it cannot be used."
-  (let* ((cur (current-buffer))
-         (url (if (mls-panel-buffer? cur) mls-current-document cur)))
+  "The document MLS acts on (mls-main-buffer). Returns #f after reporting why it
+cannot be used."
+  (let ((url (mls-main-buffer)))
     (cond ((not url) (mls-fail "no document yet: open a saved .tm file first") #f)
           ((not (url-exists? url)) (mls-fail "save the document to a file first") #f)
           (else url))))

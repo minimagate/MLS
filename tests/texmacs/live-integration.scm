@@ -44,6 +44,9 @@
 (define (live-finish)
   (mls-check "live updates retain focus on the editing buffer"
              (equal? (url->string (current-buffer)) (url->string live-document-url)))
+  (mls-badges-ensure!)
+  (mls-check "the live document on screen carries the badge package"
+             (mls-badges-attached? live-document-url))
   (let ((saved-document mls-current-document)
         (saved-view mls-current-view))
     (set! mls-current-document #f)
@@ -101,10 +104,12 @@
                     (mls-test-contains? card "conclusion.quantifier")
                     (mls-test-contains? card "disagrees")
                     (mls-test-contains? card warning))))
-  (mls-check "live status panel has an explicit open action"
+  (mls-check "live status panel opens beside the document"
              (and (mls-live-show-panel)
-                  (equal? (url->string (current-buffer)) mls-panel-name)))
-  (switch-to-buffer live-document-url)
+                  (equal? (url->string (current-buffer)) (url->string live-document-url))))
+  (mls-check "the live panel says it is live"
+             (mls-test-contains? (object->string (tree->stree (buffer-get-body mls-panel-name)))
+                                 "\"Live\""))
   (mls-check "daemon rejected didChange without advancing acknowledged revision"
              (and (= mls-live-revision 2)
                   (equal? mls-live-last-error "test rejection")
@@ -163,13 +168,16 @@ TeXmacs and the stub daemon can take several seconds to start, so a fixed pause 
                          (mls-strip-carriers (mls-body-stree live-document-url))))
       (mls-check "open added no carriers to already carried blocks"
                  (equal? live-initial-text (mls-strip-carriers (mls-body-stree url))))
-      (mls-check "live panel action opens the current view"
+      (mls-check "live panel action keeps the document current"
                  (and (mls-live-show-panel)
-                      (equal? (url->string (current-buffer)) mls-panel-name)))
+                      (equal? (url->string (current-buffer)) (url->string url))))
+      (mls-check "the session reached the live phase" (eq? mls-ui-phase 'live))
+      (mls-check "the badge package is not in the saved file"
+                 (not (mls-test-contains? (mls-test-file-text (mls-test-doc "canonical.tm"))
+                                          "mls-badges")))
       (let* ((other-url (string->url (mls-test-doc "other.tm")))
              (document-before mls-current-document)
              (view-before mls-live-view)
-             (panel-before (tree->stree (buffer-get-body mls-panel-name)))
              (calls-before (mls-test-count (live-engine-log) "CALL")))
         (load-buffer other-url)
         (switch-to-buffer other-url)
@@ -178,11 +186,12 @@ TeXmacs and the stub daemon can take several seconds to start, so a fixed pause 
                         (not (mls-formalize 'replay
                                             (mls-test-dirname
                                              (mls-test-fixture "views/replay.json"))))))
-        (mls-check "blocked batch commands preserve live document, view and panel"
+        (mls-check "blocked batch commands keep the live document and view and explain the refusal"
                    (and (equal? (url->string mls-current-document)
                                 (url->string document-before))
                         (equal? mls-live-view view-before)
-                        (equal? (tree->stree (buffer-get-body mls-panel-name)) panel-before)
+                        (mls-test-contains? (object->string (tree->stree (buffer-get-body mls-panel-name)))
+                                            "stop the MLS live session")
                         (= calls-before (mls-test-count (live-engine-log) "CALL")))))
       (switch-to-buffer url)
       ;; Add a theorem node while the live connection is active.
@@ -205,7 +214,10 @@ TeXmacs and the stub daemon can take several seconds to start, so a fixed pause 
       (delayed (:pause 180)
         (set! live-new-id (live-new-carrier-id))
         (live-focus-new-block)
-        (delayed (:pause 800)
+        (live-wait-until
+         (lambda () (and (= mls-live-revision 2) (= mls-live-view-revision 2)))
+         10000
+         (lambda ()
           (mls-check "accepted retry advances the acknowledged revision once"
                      (= mls-live-revision 2))
           (mls-check "review actions wait for the matching live status view"
@@ -220,7 +232,7 @@ TeXmacs and the stub daemon can take several seconds to start, so a fixed pause 
                      (mls-live-review-action
                       "a98f524a-4ad6-4b0d-92d2-15b37d08f555" "confirm"
                       '(("conclusion" . ""))))
-          (delayed (:pause 250) (live-finish))))))))
+          (delayed (:pause 250) (live-finish)))))))))
 
 (catch #t
   (lambda () (lazy-plugin-force) (live-run))

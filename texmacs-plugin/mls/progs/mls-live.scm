@@ -28,6 +28,8 @@
 (define mls-live-view #f)
 (define mls-live-view-revision 0)
 (define mls-live-last-error #f)
+(define mls-live-started-at 0)
+(define mls-live-ticks 0)
 
 (define (mls-live-pad-hex n)
   (let ((s (number->string n 16)))
@@ -53,9 +55,17 @@
   (mls-live-ascii (mls-json-encode object)))
 
 (define (mls-live-launcher)
-  (string-append "env MLS_LIVE=1 "
-                 (mls-sh-quote (or (getenv "MLS_LIVE_BIN") (mls-engine-path)))
-                 " serve --live"))
+  "One fixed command: the engine and the mode are read from the environment when the
+child starts (mls-live-set-launch-env!), so changing them needs no reconfiguration.
+MLS_LIVE=1 reaches only a live child."
+  (string-append
+   "sh -c 'if [ -n \"$MLS_SERVE_REPLAY\" ]; "
+   "then exec env -u MLS_LIVE \"$MLS_SERVE_BIN\" serve --replay \"$MLS_SERVE_REPLAY\"; "
+   "else exec env MLS_LIVE=1 \"$MLS_SERVE_BIN\" serve --live; fi'"))
+
+(define (mls-live-set-launch-env!)
+  (setenv "MLS_SERVE_BIN" (or (getenv "MLS_LIVE_BIN") (mls-engine-path)))
+  (setenv "MLS_SERVE_REPLAY" (if (mls-mode-replay?) (mls-replay-dir) "")))
 
 (plugin-configure mls
   (:require #t)
@@ -228,8 +238,8 @@ including its TeXmacs header/style but not the in-memory badge package."
 
 (tm-define (mls-live-start)
   (:synopsis "Start or connect the MLS live session")
-  (cond ((not (mls-live-allowed?))
-         (mls-fail "enable Allow live model calls before starting a live session"))
+  (cond ((and (mls-mode-live?) (not (mls-live-allowed?)))
+         (mls-fail "allow live model calls before starting a live session"))
         (mls-live-connected? #t)
         (else
          (let ((url (mls-document-url)))
@@ -244,6 +254,8 @@ including its TeXmacs header/style but not the in-memory badge package."
                        (set! mls-live-notifications '())
                        (set! mls-live-view #f)
                        (set! mls-live-view-revision 0)
+                       (set! mls-live-started-at (current-time))
+                       (mls-live-set-launch-env!)
                        (connection-start mls-live-language mls-live-connection-session)
                        ;; Let the connection layer finish spawning the child before the first write.
                        (delayed (:pause 400) (mls-live-send "initialize" '()))
@@ -260,16 +272,22 @@ including its TeXmacs header/style but not the in-memory badge package."
     (delayed (:pause 150)
       (catch #t (lambda () (connection-stop mls-live-language mls-live-connection-session))
               (lambda args #f))
-      (set! mls-live-connected? #f)
-      (set! mls-live-url #f)
-      (set! mls-live-document #f)
-      (set! mls-live-pending-open #f)
-      (set! mls-live-pending-change #f)
-      (set! mls-live-requests '())
-      (mls-badges-clear-dirty!)
-      (mls-badges-redraw)
+      (mls-live-drop-connection!)
       (set-message "MLS live session stopped" "MLS")))
   #t)
+
+(define (mls-live-drop-connection!)
+  "Forget the connection state. The badge package stays: pills keep the last view."
+  (let ((url mls-live-url))
+    (set! mls-live-connected? #f)
+    (set! mls-live-url #f)
+    (set! mls-live-document #f)
+    (set! mls-live-pending-open #f)
+    (set! mls-live-pending-change #f)
+    (set! mls-live-requests '())
+    (when url (set! mls-current-document url))
+    (mls-badges-clear-dirty!)
+    (mls-badges-redraw)))
 
 (define (mls-live-find-request id)
   (let ((hit (assoc id mls-live-requests)))
@@ -345,7 +363,8 @@ including its TeXmacs header/style but not the in-memory badge package."
                 ((equal? method "didOpen")
                  (set! mls-live-pending-open #f)
                  (set! mls-live-last-error reason)
-                 (set-message (string-append "MLS live: " reason) "MLS error"))
+                 (set-message (string-append "MLS live: " reason) "MLS error")
+                 (mls-ui-engine-failed! (string-append "The engine refused this document: " reason)))
                 (else
                  (set! mls-live-last-error reason)
                  (set-message (string-append "MLS live: " reason) "MLS error")))))
@@ -359,6 +378,7 @@ including its TeXmacs header/style but not the in-memory badge package."
             (set! mls-live-source (caddr open))
             (set! mls-live-pending-open #f)
             (set! mls-live-cursor-dirty? #t)
+            (mls-ui-set-phase! 'live "Watching your edits")
             (mls-live-poll-buffer))))
        ((equal? method "didChange")
         (let* ((result (mls-json-get message "result"))
@@ -412,6 +432,7 @@ including its TeXmacs header/style but not the in-memory badge package."
                  (set! mls-current-view view)
                  (set! mls-live-view view)
                  (set! mls-live-view-revision revision)
+                 (mls-ui-view-updated!)
                  (set! mls-live-notifications
                        (mls-alist-set mls-live-notifications "view" view))
                  (mls-live-render-view view))))
@@ -444,10 +465,11 @@ including its TeXmacs header/style but not the in-memory badge package."
 (tm-define (connection-notify lan ses channel tree)
   (former lan ses channel tree)
   (when (and mls-live-connected? (equal? lan mls-live-language)
-             (equal? ses mls-live-connection-session) (equal? channel "output"))
+             (equal? ses mls-live-connection-session))
     (let ((text (mls-live-text tree)))
       (when (> (string-length text) 0)
-        (mls-live-handle-json text)))))
+        (cond ((equal? channel "output") (mls-live-handle-json text))
+              ((equal? channel "error") (mls-ui-append-stderr! text)))))))
 
 (define (mls-live-poll-buffer)
   (when (and mls-live-connected? mls-live-document mls-live-url)
@@ -484,10 +506,28 @@ including its TeXmacs header/style but not the in-memory badge package."
             (set! mls-live-active active)
             (set! mls-live-cursor-dirty? #f)))))))
 
+(define (mls-live-watch)
+  "Once a second: notice a dead engine, or one that never finishes the handshake."
+  (cond ((= 0 (connection-status mls-live-language mls-live-connection-session))
+         (mls-live-drop-connection!)
+         (mls-ui-engine-failed! "The MLS engine stopped"))
+        ((and (= mls-live-revision 0) (not mls-live-pending-open)
+              (> (- (current-time) mls-live-started-at) 30))
+         (mls-live-stop)
+         (mls-ui-engine-failed! "The MLS engine did not answer"))
+        ((and (= mls-live-revision 0) mls-live-pending-open
+              (> (- (current-time) mls-live-started-at) 120))
+         (mls-live-stop)
+         (mls-ui-engine-failed! "The MLS engine did not open the document"))
+        (else (mls-badges-ensure!))))
+
 (define (mls-live-tick)
   (when mls-live-connected?
     (catch #t (lambda () (mls-live-poll-buffer))
             (lambda args #f))
+    (set! mls-live-ticks (+ mls-live-ticks 1))
+    (when (= 0 (modulo mls-live-ticks 10))
+      (catch #t (lambda () (mls-live-watch)) (lambda args #f)))
     (delayed (:pause 100) (mls-live-tick))))
 
 (tm-define (buffer-notify event tree modification)
@@ -511,18 +551,16 @@ including its TeXmacs header/style but not the in-memory badge package."
   (mls-live-with-focus
    (lambda ()
      (set! mls-current-view view)
-     (mls-live-with-suppressed-notifications
-      (lambda () (buffer-set-body mls-panel-name (tm->tree (mls-panel-tree view)))))
+     (mls-ui-refresh)
      (mls-badges-redraw)
      (let ((badge (mls-badge-text view)))
        (set-message badge "MLS")
        badge))))
 
 (tm-define (mls-live-show-panel)
-  (:synopsis "Open the live MLS status panel")
+  (:synopsis "Open the MLS panel beside the document")
   (:secure #t)
-  (cond (mls-live-view (mls-render-view mls-live-view))
-        (else (mls-fail "the live session has not received a status view yet"))))
+  (mls-ui-show-panel))
 
 (define (mls-live-apply-diagnostics view data)
   "Merge per-block diagnostics into existing panel marker errors."

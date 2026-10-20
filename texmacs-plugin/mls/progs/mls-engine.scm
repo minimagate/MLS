@@ -8,7 +8,8 @@
 ;;; is removed when the command ends, on success or failure. Results are plain lists
 ;;; (status view error); the plugin never evaluates engine output.
 ;;; Live model calls: MLS_LIVE=1 is set only for the child process of a live run,
-;;; and only when the "Allow live model calls" toggle is on.
+;;; and only after the user allowed live model calls. That permission is remembered in
+;;; the "mls-live-consent" preference and can be revoked in the MLS panel settings.
 
 (use-modules (ice-9 popen))
 
@@ -23,14 +24,15 @@
           ((and (string? pref) (> (string-length pref) 0)) pref)
           (else "mls"))))
 
-(define mls-live-session #f)
-
 (define (mls-live-allowed?)
-  "The Allow live model calls toggle. Off at every start; it is not persisted."
-  mls-live-session)
+  "True after the user allowed live model calls. Off until then; remembered after."
+  (equal? (get-preference "mls-live-consent") "on"))
+
+(define (mls-set-live-allowed! on?)
+  (set-preference "mls-live-consent" (if on? "on" "off")))
 
 (define (mls-toggle-live)
-  (set! mls-live-session (not mls-live-session)))
+  (mls-set-live-allowed! (not (mls-live-allowed?))))
 
 (define (mls-replay-dir)
   (let ((dir (get-preference "mls-replay-dir")))
@@ -183,6 +185,7 @@ succeeded."
   "Show MESSAGE as a user-visible error and return #f."
   (set! mls-last-error message)
   (set-message (string-append "MLS: " message) "MLS error")
+  (when (defined? 'mls-ui-error!) (mls-ui-error! message))
   #f)
 
 (define (mls-fail-result r)
