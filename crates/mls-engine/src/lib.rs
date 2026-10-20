@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, HashMap};
 
 pub mod decisions;
 pub mod live;
+pub mod retrieval;
 pub mod review;
 
 pub use review::{
