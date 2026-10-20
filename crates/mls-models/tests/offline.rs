@@ -8,6 +8,7 @@ use mls_models::{
     RecordingClient, ReplayClient, RetrievalConfig, Usage,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{cell::Cell, collections::BTreeMap, path::PathBuf, rc::Rc, sync::mpsc, thread};
 use tiny_http::{Header, Response, Server, StatusCode};
 
@@ -563,6 +564,42 @@ fn embedding_record(name: &str) -> RecordedCall {
         serde_json::from_slice(&std::fs::read(directory.join("call-0000.json")).unwrap()).unwrap();
     std::fs::remove_dir_all(directory).unwrap();
     record
+}
+
+#[test]
+fn embedding_record_replay_preserves_batch_44_coordinate_and_digest() {
+    // Batch 44, row 15, column 379: the default JSON parser rounded this decimal
+    // (-7.907986798727508e-08) one ULP away from its original finite f64 value.
+    let coordinate = f64::from_bits(13_723_939_570_859_376_641);
+    let mut reply = embedding_reply();
+    reply.embeddings[0][0] = coordinate;
+    let digest = Sha256::digest(serde_json::to_vec(&reply.embeddings).unwrap());
+    let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    reply.metadata.provider_response["embedding_sha256"] = json!(hash);
+
+    let directory = std::env::temp_dir().join(format!(
+        "mls-embeddings-float-roundtrip-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let mut recorder = RecordingClient::new(
+        EmbeddingFake {
+            result: Some(Ok(reply.clone())),
+            calls: Rc::new(Cell::new(0)),
+        },
+        &directory,
+        GENERATION_MODEL,
+        DECISION_MODEL,
+        "synthetic",
+    );
+    recorder.embed(&embedding_request()).unwrap();
+    let mut replay =
+        ReplayClient::from_directory(&directory, GENERATION_MODEL, DECISION_MODEL).unwrap();
+    let replayed = replay.embed(&embedding_request());
+    std::fs::remove_dir_all(directory).unwrap();
+    let replayed = replayed.unwrap();
+    assert_eq!(replayed.embeddings[0][0].to_bits(), coordinate.to_bits());
+    assert_eq!(replayed, reply);
 }
 
 #[test]

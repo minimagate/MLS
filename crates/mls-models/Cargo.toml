@@ -9,7 +9,8 @@ rust-version.workspace = true
 jsonschema = "0.33"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde.workspace = true
-serde_json.workspace = true
+# Preserve embedding f64 coordinates and their audit digests across recording replay.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 thiserror.workspace = true
 
